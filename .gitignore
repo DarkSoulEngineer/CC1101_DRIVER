@@ -1,0 +1,66 @@
+# =========================
+# ESP-IDF Specifics
+# =========================
+build/
+sdkconfig.old
+managed_components/
+dependencies.lock
+.embuild/
+bootloader/
+partition_table/
+
+# =========================
+# Compiled Artifacts
+# =========================
+*.o
+*.a
+*.so
+*.obj
+*.lib
+*.dll
+*.bin
+*.elf
+*.map
+*.hex
+
+# =========================
+# RF Data Captures & Logs
+# =========================
+# Ignore signal captures, dumps, or fuzzing logs from the CC1101
+*.iq
+*.raw
+*.pcap
+*.csv
+logs/
+*.log
+
+# =========================
+# Editor / Terminal Workflows
+# =========================
+# Vim / Neovim
+*.swp
+*.swo
+*~
+Session.vim
+.netrwhist
+
+# VS Code (if used collaboratively)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# =========================
+# OS Generated Files
+# =========================
+# Linux/macOS/Windows noise
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.directory
