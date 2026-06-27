@@ -1,4 +1,4 @@
-# CONFIDENTIAL: Native CC1101 ESP-IDF Driver
+# Native CC1101 ESP-IDF Driver
 
 A zero-dependency, professional-grade driver for the Texas Instruments CC1101 sub-1 GHz RF transceiver. Engineered exclusively for the ESP-IDF SDK, this framework provides deterministic execution, thread-safe SPI management, and uncompromising physical layer (PHY) control for high-performance ESP32 applications.
 
