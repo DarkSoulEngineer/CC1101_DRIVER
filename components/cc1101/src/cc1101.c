@@ -33,6 +33,7 @@ static esp_err_t cc1101_wait_miso(cc1101_handle_t *dev)
             ESP_LOGE(TAG, "MISO timeout");
             return ESP_ERR_TIMEOUT;
         }
+        esp_rom_delay_us(1);
     }
 
     return ESP_OK;
@@ -242,8 +243,21 @@ void cc1101_config(cc1101_handle_t *dev)
     cc1101_write_reg(dev, CC1101_MCSM0,
                      CC1101_AUTOCAL_IDLE_TO_RXTX);
 
+    cc1101_write_reg(dev, CC1101_MCSM1, 0x3F);
+
     cc1101_strobe(dev, CC1101_SCAL);
     vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+esp_err_t cc1101_set_tx_len(cc1101_handle_t *dev, uint8_t len) {
+    cc1101_write_reg(dev, CC1101_PKTLEN, len);
+    return ESP_OK;
+}
+
+void cc1101_set_tx_mode(cc1101_handle_t *dev)
+{
+    cc1101_strobe(dev, CC1101_SIDLE);
+    cc1101_strobe(dev, CC1101_SFTX);
 }
 
 void cc1101_transmit(cc1101_handle_t *dev, uint8_t *data, size_t len)
@@ -270,7 +284,7 @@ void cc1101_transmit(cc1101_handle_t *dev, uint8_t *data, size_t len)
         len = CC1101_MAX_PAYLOAD_LEN;
     }
 
-    uint8_t packet[CC1101_FIFO_SIZE];
+    uint8_t packet[CC1101_FIFO_SIZE + 1];
     packet[0] = (uint8_t)len;
 
     memcpy(&packet[1], data, len);
@@ -382,23 +396,16 @@ esp_err_t cc1101_set_datarate(cc1101_handle_t *dev, uint32_t baud)
 {
     uint8_t best_e = 0;
     uint8_t best_m = 0;
-    uint64_t best_error = ULLONG_MAX;
 
     for (uint8_t e = 0; e < 16; e++)
     {
-        for (uint16_t m = 0; m < 256; m++)
+        uint64_t val = ((uint64_t)baud << 28) / (26000000ULL << e);
+        
+        if (val >= 256 && val <= 511)
         {
-            uint64_t rate =
-                (((256ULL + m) << e) * 26000000ULL) >> 28;
-
-            uint64_t error = (rate > baud) ? (rate - baud) : (baud - rate);
-
-            if (error < best_error)
-            {
-                best_error = error;
-                best_e = e;
-                best_m = m;
-            }
+            best_e = e;
+            best_m = (uint8_t)(val - 256);
+            break;
         }
     }
 

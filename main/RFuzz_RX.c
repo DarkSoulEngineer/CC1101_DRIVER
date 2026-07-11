@@ -10,7 +10,7 @@ static const char *TAG = "RFUZZ";
 
 void app_main(void)
 {
-    uint8_t data[1] = {0x00};
+    uint8_t data[CC1101_MAX_PACKET_LEN] = {0}; 
     cc1101_handle_t radio;
 
     ESP_LOGI(TAG, "Starting RFuzz...");
@@ -48,20 +48,23 @@ void app_main(void)
 
     cc1101_config(&radio);
 
-    cc1101_set_frequency(&radio, 433920000);   // 433.92 MHz
+    cc1101_set_frequency(&radio, 433920000);
     cc1101_set_channel(&radio, 0);
     cc1101_set_datarate(&radio, 38400);
-
+    cc1101_set_rx_mode(&radio);
     cc1101_dump_registers(&radio);
 
     while (1)
     {
-        ESP_LOGI(TAG, "TX Byte: 0x%02X", data[0]);
+        size_t len = sizeof(data);
 
-        cc1101_transmit(&radio, data, sizeof(data));
+        if (cc1101_receive_packet(&radio, data, &len))
+        {
+            ESP_LOGI(TAG, "Received packet (Length: %zu): %02X", len, data[0]);
+            cc1101_set_rx_mode(&radio);
+        }
 
-        data[0]++;
-
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+

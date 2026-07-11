@@ -27,6 +27,7 @@ esp_err_t init_hardware(void)
         .sclk_io_num = PIN_NUM_CLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
+        .max_transfer_sz = 256
     };
 
     spi_device_interface_config_t devcfg = {
@@ -36,7 +37,7 @@ esp_err_t init_hardware(void)
         .queue_size = 1, 
     };
 
-    esp_err_t ret = spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_DISABLED);
+    esp_err_t ret = spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI Bus Init Failed: %s", esp_err_to_name(ret));
         return ret;

@@ -236,6 +236,7 @@ esp_err_t cc1101_set_frequency(cc1101_handle_t *dev, uint32_t freq_hz);
 esp_err_t cc1101_set_channel(cc1101_handle_t *dev, uint8_t channel);
 esp_err_t cc1101_set_tx_power(cc1101_handle_t *dev, uint8_t pa_value);
 esp_err_t cc1101_set_datarate(cc1101_handle_t *dev, uint32_t baud);
+esp_err_t cc1101_set_tx_len(cc1101_handle_t *dev, uint8_t len);
 void cc1101_dump_registers(cc1101_handle_t *dev);
 
 /* ============================================================
@@ -251,6 +252,7 @@ esp_err_t cc1101_init(cc1101_handle_t *dev,
 void cc1101_reset(cc1101_handle_t *dev);
 void cc1101_config(cc1101_handle_t *dev);
 void cc1101_transmit(cc1101_handle_t *dev, uint8_t *data, size_t len);
+void cc1101_set_tx_mode(cc1101_handle_t *dev);
 void cc1101_set_rx_mode(cc1101_handle_t *dev);
 bool cc1101_receive_packet(cc1101_handle_t *dev, uint8_t *buffer, size_t *len);
 uint8_t cc1101_read_status_reg(cc1101_handle_t *dev, uint8_t reg);
