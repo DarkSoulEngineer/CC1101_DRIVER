@@ -9,21 +9,25 @@
 
 static const char *TAG = "RFUZZ";
 
-static const cc1101_config_t beacon_cfg = {
+/* ============================================================
+ * CC1101 Configuration
+ * ============================================================ */
+
+static const cc1101_config_t radio_cfg = {
     .freq_hz   = 433920000,
     .channel   = 0,
-    .pa_value  = CC1101_PA_0dBm,
+    .pa_value  = CC1101_PA_POS10dBm,
     .isr_enabled = true,
 
     .modem = {
-        .modulation      = CC1101_MOD_GFSK_E,
-        .sync_mode       = CC1101_SYNC_30_32_E,
+        .modulation      = CC1101_MOD_ASK_E,
+        .sync_mode       = CC1101_SYNC_16_16_E,
         .dc_filter_off   = false,
         .manchester      = false,
         .fec_enable      = false,
-        .preamble_bytes  = 2,
-        .datarate_bps    = 38400,
-        .deviation       = 0x03,
+        .preamble_bytes  = 1,
+        .datarate_bps    = 4800,
+        .deviation       = 0x00,
         .chanbw          = 0x03,
         .channel_spacing = 248,
     },
@@ -33,7 +37,7 @@ static const cc1101_config_t beacon_cfg = {
         .crc_enable    = true,
         .whitening     = false,
         .append_status = true,
-        .max_length    = 255,
+        .max_length    = 64,
         .addr_check    = CC1101_ADR_CHK_NONE,
         .sync1         = 0x2D,
         .sync0         = 0xD4,
@@ -48,12 +52,15 @@ static const cc1101_config_t beacon_cfg = {
     },
 };
 
+/* ============================================================
+ * Application
+ * ============================================================ */
+
 void app_main(void)
 {
-    uint8_t data[] = {0xDE, 0xAD, 0xBE, 0xEF};
-    cc1101_handle_t radio;
+    static cc1101_handle_t radio;
 
-    ESP_LOGI(TAG, "Starting RFuzz Etalon Beacon...");
+    ESP_LOGI(TAG, "=== RFuzz TX ===");
 
     if (init_hardware() != ESP_OK) {
         ESP_LOGE(TAG, "Hardware init failed");
@@ -72,24 +79,22 @@ void app_main(void)
              cc1101_read_status_reg(&radio, CC1101_PARTNUM),
              cc1101_read_status_reg(&radio, CC1101_VERSION));
 
-    if (cc1101_configure(&radio, &beacon_cfg) != ESP_OK) {
+    if (cc1101_configure(&radio, &radio_cfg) != ESP_OK) {
         ESP_LOGE(TAG, "CC1101 configure failed");
         while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
     }
 
-    cc1101_dump_registers(&radio);
+    const uint8_t payload[] = "Hello";
+    ESP_LOGI(TAG, "Sending: %s (%d bytes)", payload, (int)sizeof(payload) - 1);
 
-    while (1) {
-        ESP_LOGI(TAG, "Transmitting Beacon...");
+    cc1101_transmit(&radio, (uint8_t *)payload, sizeof(payload) - 1);
 
-        cc1101_transmit(&radio, data, sizeof(data));
-
-        if (cc1101_wait_tx_done(&radio, 500)) {
-            ESP_LOGI(TAG, "TX Complete (Hardware Confirmed)");
-        } else {
-            ESP_LOGW(TAG, "TX Timeout! Interrupt failed.");
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(3000));
+    if (cc1101_wait_tx_done(&radio, 500)) {
+        ESP_LOGI(TAG, "TX done!");
+    } else {
+        ESP_LOGW(TAG, "TX timeout (no ISR or GDO0 not connected)");
     }
+
+    ESP_LOGI(TAG, "complete");
+    vTaskDelete(NULL);
 }

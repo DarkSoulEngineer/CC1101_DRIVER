@@ -1,4 +1,4 @@
 # main/idf_component.yml
 dependencies:
-  nopnop2002/esp-idf-cc1101:
-    version: "1.0.0"
+  idf:
+    version: ">=5.0"
