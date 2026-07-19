@@ -16,26 +16,13 @@ static const char *TAG = "CC1101";
 static inline void cc1101_select(cc1101_handle_t *dev)
 {
     gpio_set_level(dev->cs_pin, 0);
-    esp_rom_delay_us(1);  /* t_CSS: CS low to first SCK */
+    esp_rom_delay_us(5);
 }
 
 static inline void cc1101_deselect(cc1101_handle_t *dev)
 {
     gpio_set_level(dev->cs_pin, 1);
-    esp_rom_delay_us(1);  /* t_CSH: CS high between transactions */
-}
-
-static esp_err_t cc1101_wait_miso(cc1101_handle_t *dev)
-{
-    int timeout = 100000;
-    while (gpio_get_level(dev->miso_pin)) {
-        if (--timeout <= 0) {
-            ESP_LOGE(TAG, "MISO timeout");
-            return ESP_ERR_TIMEOUT;
-        }
-        esp_rom_delay_us(1);
-    }
-    return ESP_OK;
+    esp_rom_delay_us(5);
 }
 
 /* ============================================================
@@ -60,37 +47,40 @@ static void IRAM_ATTR cc1101_gdo0_isr(void *arg)
 
 uint8_t cc1101_strobe(cc1101_handle_t *dev, uint8_t strobe)
 {
-    uint8_t status = 0;
+    uint8_t tx_data[1] = { strobe };
+    uint8_t rx_data[1] = { 0 };
+
     xSemaphoreTake(dev->spi_mutex, portMAX_DELAY);
 
     cc1101_select(dev);
-    if (cc1101_wait_miso(dev) == ESP_OK) {
-        spi_transaction_t t = {0};
-        t.length = 8;
-        t.flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA;
-        t.tx_data[0] = strobe;
-        if (spi_device_polling_transmit(dev->spi, &t) == ESP_OK)
-            status = t.rx_data[0];
-    }
+
+    spi_transaction_t t = {0};
+    t.length = 8;
+    t.tx_buffer = tx_data;
+    t.rx_buffer = rx_data;
+    spi_device_polling_transmit(dev->spi, &t);
+
     cc1101_deselect(dev);
 
     xSemaphoreGive(dev->spi_mutex);
-    return status;
+    return rx_data[0];
 }
 
 void cc1101_write_reg(cc1101_handle_t *dev, uint8_t reg, uint8_t value)
 {
+    uint8_t tx_data[2] = { reg, value };
+    uint8_t rx_data[2] = { 0, 0 };
+
     xSemaphoreTake(dev->spi_mutex, portMAX_DELAY);
 
     cc1101_select(dev);
-    if (cc1101_wait_miso(dev) == ESP_OK) {
-        spi_transaction_t t = {0};
-        t.length = 16;
-        t.flags = SPI_TRANS_USE_TXDATA;
-        t.tx_data[0] = reg;
-        t.tx_data[1] = value;
-        spi_device_polling_transmit(dev->spi, &t);
-    }
+
+    spi_transaction_t t = {0};
+    t.length = 16;
+    t.tx_buffer = tx_data;
+    t.rx_buffer = rx_data;
+    spi_device_polling_transmit(dev->spi, &t);
+
     cc1101_deselect(dev);
 
     xSemaphoreGive(dev->spi_mutex);
@@ -98,44 +88,44 @@ void cc1101_write_reg(cc1101_handle_t *dev, uint8_t reg, uint8_t value)
 
 uint8_t cc1101_read_reg(cc1101_handle_t *dev, uint8_t reg)
 {
-    uint8_t value = 0;
+    uint8_t tx_data[2] = { reg | CC1101_READ_SINGLE, 0x00 };
+    uint8_t rx_data[2] = { 0x00, 0x00 };
+
     xSemaphoreTake(dev->spi_mutex, portMAX_DELAY);
 
     cc1101_select(dev);
-    if (cc1101_wait_miso(dev) == ESP_OK) {
-        spi_transaction_t t = {0};
-        t.length = 16;
-        t.flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA;
-        t.tx_data[0] = reg | CC1101_READ_SINGLE;
-        t.tx_data[1] = 0;
-        spi_device_polling_transmit(dev->spi, &t);
-        value = t.rx_data[1];
-    }
+
+    spi_transaction_t t = {0};
+    t.length = 16;
+    t.tx_buffer = tx_data;
+    t.rx_buffer = rx_data;
+    spi_device_polling_transmit(dev->spi, &t);
+
     cc1101_deselect(dev);
 
     xSemaphoreGive(dev->spi_mutex);
-    return value;
+    return rx_data[1];
 }
 
 static uint8_t cc1101_read_status(cc1101_handle_t *dev, uint8_t reg)
 {
-    uint8_t value = 0;
+    uint8_t tx_data[2] = { reg | CC1101_READ_BURST, 0x00 };
+    uint8_t rx_data[2] = { 0x00, 0x00 };
+
     xSemaphoreTake(dev->spi_mutex, portMAX_DELAY);
 
     cc1101_select(dev);
-    if (cc1101_wait_miso(dev) == ESP_OK) {
-        spi_transaction_t t = {0};
-        t.length = 16;
-        t.flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA;
-        t.tx_data[0] = reg | CC1101_READ_BURST;
-        t.tx_data[1] = 0;
-        spi_device_polling_transmit(dev->spi, &t);
-        value = t.rx_data[1];
-    }
+
+    spi_transaction_t t = {0};
+    t.length = 16;
+    t.tx_buffer = tx_data;
+    t.rx_buffer = rx_data;
+    spi_device_polling_transmit(dev->spi, &t);
+
     cc1101_deselect(dev);
 
     xSemaphoreGive(dev->spi_mutex);
-    return value;
+    return rx_data[1];
 }
 
 static void cc1101_write_burst(cc1101_handle_t *dev,
@@ -143,19 +133,22 @@ static void cc1101_write_burst(cc1101_handle_t *dev,
                                const uint8_t *data,
                                uint8_t len)
 {
+    uint8_t tx_buf[1 + CC1101_FIFO_SIZE];
+    uint8_t rx_buf[1 + CC1101_FIFO_SIZE];
+    tx_buf[0] = reg | CC1101_WRITE_BURST;
+    memcpy(&tx_buf[1], data, len);
+    memset(rx_buf, 0, sizeof(rx_buf));
+
     xSemaphoreTake(dev->spi_mutex, portMAX_DELAY);
 
     cc1101_select(dev);
-    if (cc1101_wait_miso(dev) == ESP_OK) {
-        uint8_t buf[1 + CC1101_FIFO_SIZE];
-        buf[0] = reg | CC1101_WRITE_BURST;
-        memcpy(&buf[1], data, len);
 
-        spi_transaction_t t = {0};
-        t.length = (1 + len) * 8;
-        t.tx_buffer = buf;
-        spi_device_polling_transmit(dev->spi, &t);
-    }
+    spi_transaction_t t = {0};
+    t.length = (1 + len) * 8;
+    t.tx_buffer = tx_buf;
+    t.rx_buffer = rx_buf;
+    spi_device_polling_transmit(dev->spi, &t);
+
     cc1101_deselect(dev);
 
     xSemaphoreGive(dev->spi_mutex);
@@ -166,28 +159,28 @@ static void cc1101_read_burst(cc1101_handle_t *dev,
                               uint8_t *data,
                               uint8_t len)
 {
+    uint8_t tx_buf[1 + CC1101_FIFO_SIZE];
+    uint8_t rx_buf[1 + CC1101_FIFO_SIZE];
+    memset(tx_buf, 0, sizeof(tx_buf));
+    memset(rx_buf, 0, sizeof(rx_buf));
+
+    tx_buf[0] = reg | CC1101_READ_BURST;
+
     xSemaphoreTake(dev->spi_mutex, portMAX_DELAY);
 
     cc1101_select(dev);
-    if (cc1101_wait_miso(dev) == ESP_OK) {
-        uint8_t tx_buf[1 + CC1101_FIFO_SIZE];
-        uint8_t rx_buf[1 + CC1101_FIFO_SIZE];
-        memset(tx_buf, 0, sizeof(tx_buf));
-        memset(rx_buf, 0, sizeof(rx_buf));
 
-        tx_buf[0] = reg | CC1101_READ_BURST;
+    spi_transaction_t t = {0};
+    t.length = (1 + len) * 8;
+    t.tx_buffer = tx_buf;
+    t.rx_buffer = rx_buf;
+    spi_device_polling_transmit(dev->spi, &t);
 
-        spi_transaction_t t = {0};
-        t.length = (1 + len) * 8;
-        t.tx_buffer = tx_buf;
-        t.rx_buffer = rx_buf;
-        spi_device_polling_transmit(dev->spi, &t);
-
-        memcpy(data, &rx_buf[1], len);
-    }
     cc1101_deselect(dev);
 
     xSemaphoreGive(dev->spi_mutex);
+
+    memcpy(data, &rx_buf[1], len);
 }
 
 /* ============================================================
@@ -240,28 +233,55 @@ esp_err_t cc1101_init(cc1101_handle_t *dev,
 
 esp_err_t cc1101_reset(cc1101_handle_t *dev)
 {
+    /* 1. Pulse CS high→low→high to reset SPI port */
     cc1101_deselect(dev);
     esp_rom_delay_us(5);
 
     cc1101_select(dev);
-    esp_rom_delay_us(10);
+    esp_rom_delay_us(5);
     cc1101_deselect(dev);
-    esp_rom_delay_us(40);
 
+    /* 2. Wait ≥40us for voltage regulator to stabilize */
+    esp_rom_delay_us(45);
+
+    /* 3. Pull CS low, wait for MISO to go low (chip ready) */
     cc1101_select(dev);
-    cc1101_wait_miso(dev);
+    esp_err_t ret = ESP_OK;
+    int timeout = 100000;
+    while (gpio_get_level(dev->miso_pin)) {
+        if (--timeout <= 0) {
+            ESP_LOGE(TAG, "Reset failed: MISO didn't go low after CS");
+            cc1101_deselect(dev);
+            return ESP_ERR_TIMEOUT;
+        }
+        esp_rom_delay_us(1);
+    }
 
-    spi_transaction_t t = {0};
-    t.length = 8;
-    t.flags = SPI_TRANS_USE_TXDATA;
-    t.tx_data[0] = CC1101_SRES;
+    /* 4. Send SRES (0x30) — raw SPI byte, CS stays low */
+    uint8_t tx_data[1] = { CC1101_SRES };
+    uint8_t rx_data[1] = { 0 };
+    spi_transaction_t t = {
+        .length = 8,
+        .tx_buffer = tx_data,
+        .rx_buffer = rx_data,
+    };
     spi_device_polling_transmit(dev->spi, &t);
 
-    cc1101_wait_miso(dev);
+    /* 5. Wait for MISO to go low again (reset complete) */
+    timeout = 100000;
+    while (gpio_get_level(dev->miso_pin)) {
+        if (--timeout <= 0) {
+            ESP_LOGE(TAG, "Reset failed: MISO didn't go low after SRES");
+            cc1101_deselect(dev);
+            return ESP_ERR_TIMEOUT;
+        }
+        esp_rom_delay_us(1);
+    }
+
     cc1101_deselect(dev);
 
     vTaskDelay(pdMS_TO_TICKS(10));
-    return ESP_OK;
+    return ret;
 }
 
 /* ============================================================

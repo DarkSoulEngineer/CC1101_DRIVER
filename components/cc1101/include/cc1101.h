@@ -492,7 +492,7 @@ static inline cc1101_config_t cc1101_default_config(void)
             .gdo0_mode  = CC1101_GDO_SYNC_WORD,
             .gdo2_mode  = CC1101_GDO_HIGH_Z,
         },
-        .freq_hz     = CONFIG_CC1101_FREQ_HZ,
+        .freq_hz     = CC1101_CFG_FREQ,
         .channel     = 0,
         .pa_value    = CC1101_CFG_PA,
 #ifdef CONFIG_CC1101_ISR_ENABLE
