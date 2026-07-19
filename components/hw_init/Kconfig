@@ -1,0 +1,46 @@
+menu "CC1101 Hardware Pinout"
+
+    config CC1101_PIN_GDO0
+        int "GDO0 pin"
+        default 4
+        range 0 48
+        help
+            GPIO pin connected to CC1101 GDO0 (interrupt / data output).
+
+    config CC1101_PIN_CS
+        int "CS (chip select) pin"
+        default 5
+        range 0 48
+        help
+            GPIO pin connected to CC1101 CSN (active low chip select).
+
+    config CC1101_PIN_SCK
+        int "SCK (SPI clock) pin"
+        default 15
+        range 0 48
+        help
+            GPIO pin connected to CC1101 SCLK.
+
+    config CC1101_PIN_MOSI
+        int "MOSI pin"
+        default 7
+        range 0 48
+        help
+            GPIO pin connected to CC1101 MOSI (master out slave in).
+
+    config CC1101_PIN_MISO
+        int "MISO pin"
+        default 6
+        range 0 48
+        help
+            GPIO pin connected to CC1101 MISO (master in slave out).
+
+    config CC1101_SPI_HZ
+        int "SPI clock speed (Hz)"
+        default 1000000
+        range 100000 8000000
+        help
+            SPI clock frequency in Hz. CC1101 supports up to 10 MHz,
+            recommend 1 MHz for reliability.
+
+endmenu

@@ -1,0 +1,156 @@
+menu "CC1101 Radio Configuration"
+
+    choice CC1101_FREQ_BAND
+        prompt "Frequency band"
+        default CC1101_FREQ_433
+        help
+            Select the RF frequency band.
+
+        config CC1101_FREQ_433
+            bool "433 MHz ISM band"
+        config CC1101_FREQ_868
+            bool "868 MHz SRD band"
+        config CC1101_FREQ_915
+            bool "915 MHz ISM band"
+    endchoice
+
+    config CC1101_FREQ_HZ
+        int "Frequency override (Hz, 0 = use band default)"
+        default 0
+        help
+            Override the exact frequency in Hz.
+            0 = use band default (433920000 / 868300000 / 915000000).
+
+    choice CC1101_MODULATION
+        prompt "Modulation format"
+        default CC1101_MOD_2FSK
+        help
+            RF modulation scheme.
+
+        config CC1101_MOD_2FSK
+            bool "2-FSK"
+        config CC1101_MOD_GFSK
+            bool "GFSK"
+        config CC1101_MOD_ASK_OOK
+            bool "ASK/OOK"
+        config CC1101_MOD_4FSK
+            bool "4-FSK"
+        config CC1101_MOD_MSK
+            bool "MSK"
+    endchoice
+
+    config CC1101_DATARATE
+        int "Datarate (bps)"
+        default 2400
+        range 600 500000
+        help
+            Over-the-air datarate in bits per second.
+
+    config CC1101_DEVIATION
+        int "Frequency deviation (register 0-7)"
+        default 4
+        range 0 7
+        help
+            DEVIATN register value (0-7).
+            Deviation = (8 + M) * 2^E * fref / 2^17
+            where M = deviation & 0x07, E = (deviation >> 4) & 0x07.
+            Common: 3=24kHz, 4=24kHz, 5=47kHz.
+
+    config CC1101_CHANNEL_BW
+        int "Channel bandwidth (MDMCFG4 BW bits, 0-60)"
+        default 12
+        range 0 60
+        help
+            Channel bandwidth portion of MDMCFG4 register.
+            Value = (CHANBW_E << 4) | CHANBW_M, where E,M are 0-3.
+            BW = 26MHz / (8 * (4 + M) * 2^E).
+            0x00=58kHz, 0x30=81kHz, 0x40=101kHz, 0x80=128kHz,
+            0x90=162kHz, 0xB0=203kHz, 0xC0=258kHz.
+
+    config CC1101_SYNC_MODE
+        int "Sync word mode (0-7)"
+        default 2
+        range 0 7
+        help
+            Sync word detection mode. 2=16/16 recommended.
+
+    config CC1101_SYNC_WORD
+        int "Sync word (16-bit decimal)"
+        default 45022
+        help
+            16-bit sync word sent MSB first. 45022 = 0xAFDE.
+
+    config CC1101_PREAMBLE_BYTES
+        int "Preamble bytes"
+        default 4
+        range 0 32
+        help
+            Number of preamble bytes (0, 2, 4, 8, 12, 16, 20, 24, 28, 32).
+
+    choice CC1101_PKT_MODE
+        prompt "Packet mode"
+        default CC1101_PKT_FIXED
+        help
+            Packet length mode.
+
+        config CC1101_PKT_FIXED
+            bool "Fixed length"
+        config CC1101_PKT_VARIABLE
+            bool "Variable length"
+        config CC1101_PKT_INFINITE
+            bool "Infinite length (async)"
+    endchoice
+
+    config CC1101_CRC_ENABLE
+        bool "Enable CRC"
+        default n
+
+    config CC1101_WHITENING
+        bool "Enable whitening"
+        default n
+
+    config CC1101_APPEND_STATUS
+        bool "Append status bytes (RSSI + CRC)"
+        default n
+
+    choice CC1101_PA_PRESET
+        prompt "TX power"
+        default CC1101_PA_10dBm
+        help
+            PA output power level.
+
+        config CC1101_PA_neg30dBm
+            bool "-30 dBm"
+        config CC1101_PA_neg20dBm
+            bool "-20 dBm"
+        config CC1101_PA_neg15dBm
+            bool "-15 dBm"
+        config CC1101_PA_neg10dBm
+            bool "-10 dBm"
+        config CC1101_PA_0dBm
+            bool "0 dBm"
+        config CC1101_PA_5dBm
+            bool "+5 dBm"
+        config CC1101_PA_7dBm
+            bool "+7 dBm"
+        config CC1101_PA_10dBm
+            bool "+10 dBm"
+        config CC1101_PA_12dBm
+            bool "+12 dBm"
+    endchoice
+
+    config CC1101_PA_VALUE
+        int "PA table value (raw, 0 = use preset)"
+        default 0
+        range 0 199
+        help
+            Raw PA register value. If non-zero, overrides the preset above.
+            0 = use preset selection.
+
+    config CC1101_ISR_ENABLE
+        bool "Enable GDO0 interrupt (TX done)"
+        default n
+        help
+            Enable GPIO interrupt on GDO0 for TX completion.
+
+endmenu

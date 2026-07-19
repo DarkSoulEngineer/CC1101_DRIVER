@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "sdkconfig.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
@@ -357,6 +358,153 @@ esp_err_t cc1101_set_tx_len(cc1101_handle_t *dev, uint8_t len);
 
 esp_err_t cc1101_isr_enable(cc1101_handle_t *dev, bool enable);
 bool      cc1101_wait_tx_done(cc1101_handle_t *dev, uint32_t timeout_ms);
+
+/* ============================================================
+ * KCONFIG -> ENUM MAPPING
+ * ============================================================ */
+
+#ifdef CONFIG_CC1101_MOD_2FSK
+#define CC1101_CFG_MOD   CC1101_MOD_2FSK_E
+#elif defined(CONFIG_CC1101_MOD_GFSK)
+#define CC1101_CFG_MOD   CC1101_MOD_GFSK_E
+#elif defined(CONFIG_CC1101_MOD_ASK_OOK)
+#define CC1101_CFG_MOD   CC1101_MOD_ASK_E
+#elif defined(CONFIG_CC1101_MOD_4FSK)
+#define CC1101_CFG_MOD   CC1101_MOD_4FSK_E
+#elif defined(CONFIG_CC1101_MOD_MSK)
+#define CC1101_CFG_MOD   CC1101_MOD_MSK_E
+#else
+#define CC1101_CFG_MOD   CC1101_MOD_2FSK_E
+#endif
+
+#ifdef CONFIG_CC1101_FREQ_433
+#define CC1101_CFG_FREQ_BAND  433920000
+#elif defined(CONFIG_CC1101_FREQ_868)
+#define CC1101_CFG_FREQ_BAND  868300000
+#elif defined(CONFIG_CC1101_FREQ_915)
+#define CC1101_CFG_FREQ_BAND  915000000
+#else
+#define CC1101_CFG_FREQ_BAND  433920000
+#endif
+
+/* If user set a non-zero override, use it; otherwise use band default */
+#if CONFIG_CC1101_FREQ_HZ > 0
+#define CC1101_CFG_FREQ CONFIG_CC1101_FREQ_HZ
+#else
+#define CC1101_CFG_FREQ CC1101_CFG_FREQ_BAND
+#endif
+
+#ifdef CONFIG_CC1101_PKT_FIXED
+#define CC1101_CFG_PKT   CC1101_PKT_FIXED_E
+#elif defined(CONFIG_CC1101_PKT_VARIABLE)
+#define CC1101_CFG_PKT   CC1101_PKT_VARIABLE_E
+#elif defined(CONFIG_CC1101_PKT_INFINITE)
+#define CC1101_CFG_PKT   CC1101_PKT_INFINITE_E
+#else
+#define CC1101_CFG_PKT   CC1101_PKT_FIXED_E
+#endif
+
+#ifdef CONFIG_CC1101_PA_neg30dBm
+#define CC1101_CFG_PA    CC1101_PA_NEG30dBm
+#elif defined(CONFIG_CC1101_PA_neg20dBm)
+#define CC1101_CFG_PA    CC1101_PA_NEG20dBm
+#elif defined(CONFIG_CC1101_PA_neg15dBm)
+#define CC1101_CFG_PA    CC1101_PA_NEG15dBm
+#elif defined(CONFIG_CC1101_PA_neg10dBm)
+#define CC1101_CFG_PA    CC1101_PA_NEG10dBm
+#elif defined(CONFIG_CC1101_PA_0dBm)
+#define CC1101_CFG_PA    CC1101_PA_0dBm
+#elif defined(CONFIG_CC1101_PA_5dBm)
+#define CC1101_CFG_PA    CC1101_PA_POS5dBm
+#elif defined(CONFIG_CC1101_PA_7dBm)
+#define CC1101_CFG_PA    CC1101_PA_POS7dBm
+#elif defined(CONFIG_CC1101_PA_10dBm)
+#define CC1101_CFG_PA    CC1101_PA_POS10dBm
+#elif defined(CONFIG_CC1101_PA_12dBm)
+#define CC1101_CFG_PA    CC1101_PA_POS12dBm
+#else
+#define CC1101_CFG_PA    CC1101_PA_POS10dBm
+#endif
+
+/* Sync word bytes */
+#define CC1101_CFG_SYNC1  ((CONFIG_CC1101_SYNC_WORD >> 8) & 0xFF)
+#define CC1101_CFG_SYNC0  (CONFIG_CC1101_SYNC_WORD & 0xFF)
+
+/* PA override: if user sets raw value in menuconfig, use it */
+#if CONFIG_CC1101_PA_VALUE != 0
+#undef CC1101_CFG_PA
+#define CC1101_CFG_PA    CONFIG_CC1101_PA_VALUE
+#endif
+
+/* ============================================================
+ * DEFAULT CONFIG BUILDER
+ *
+ *   Populates a cc1101_config_t from Kconfig values.
+ *   Caller can override individual fields after this call.
+ *
+ *   Usage:
+ *     cc1101_config_t cfg = CC1101_DEFAULT_CONFIG();
+ *     cfg.freq_hz = 868300000;       // override freq at runtime
+ *     cc1101_configure(&radio, &cfg);
+ * ============================================================ */
+
+static inline cc1101_config_t cc1101_default_config(void)
+{
+    cc1101_config_t cfg = {
+        .modem = {
+            .modulation       = CC1101_CFG_MOD,
+            .sync_mode        = (cc1101_sync_mode_t)CONFIG_CC1101_SYNC_MODE,
+            .dc_filter_off    = false,
+            .manchester       = false,
+            .fec_enable       = false,
+            .preamble_bytes   = CONFIG_CC1101_PREAMBLE_BYTES,
+            .datarate_bps     = CONFIG_CC1101_DATARATE,
+            .deviation        = CONFIG_CC1101_DEVIATION,
+            .chanbw           = (uint8_t)CONFIG_CC1101_CHANNEL_BW,
+            .channel_spacing  = 0,
+        },
+        .packet = {
+            .mode          = CC1101_CFG_PKT,
+#ifdef CONFIG_CC1101_CRC_ENABLE
+            .crc_enable    = true,
+#else
+            .crc_enable    = false,
+#endif
+#ifdef CONFIG_CC1101_WHITENING
+            .whitening     = true,
+#else
+            .whitening     = false,
+#endif
+#ifdef CONFIG_CC1101_APPEND_STATUS
+            .append_status = true,
+#else
+            .append_status = false,
+#endif
+            .max_length    = 0,
+            .addr_check    = CC1101_ADR_CHK_NONE,
+            .sync1         = CC1101_CFG_SYNC1,
+            .sync0         = CC1101_CFG_SYNC0,
+        },
+        .radio = {
+            .autocal    = CC1101_AUTOCAL_ALWAYS,
+            .pin_mode   = 0x00,
+            .pin_output = false,
+            .gdo0_mode  = CC1101_GDO_SYNC_WORD,
+            .gdo2_mode  = CC1101_GDO_HIGH_Z,
+        },
+        .freq_hz     = CONFIG_CC1101_FREQ_HZ,
+        .channel     = 0,
+        .pa_value    = CC1101_CFG_PA,
+#ifdef CONFIG_CC1101_ISR_ENABLE
+        .isr_enabled = true,
+#else
+        .isr_enabled = false,
+#endif
+    };
+    return cfg;
+}
+
+#define CC1101_DEFAULT_CONFIG()  cc1101_default_config()
 
 /* ============================================================
  * PUBLIC API - LOW LEVEL (used by sniffer)

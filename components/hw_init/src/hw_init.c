@@ -21,7 +21,7 @@ esp_err_t init_hardware(void)
     };
 
     spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 1000000,  /* 1 MHz */
+        .clock_speed_hz = CC1101_SPI_SPEED_HZ,
         .mode = 0,
         .spics_io_num = -1,
         .queue_size = 1,
