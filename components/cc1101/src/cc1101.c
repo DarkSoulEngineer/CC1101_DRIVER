@@ -233,7 +233,6 @@ esp_err_t cc1101_init(cc1101_handle_t *dev,
 
 esp_err_t cc1101_reset(cc1101_handle_t *dev)
 {
-    /* 1. Pulse CS high→low→high to reset SPI port */
     cc1101_deselect(dev);
     esp_rom_delay_us(5);
 
@@ -241,10 +240,8 @@ esp_err_t cc1101_reset(cc1101_handle_t *dev)
     esp_rom_delay_us(5);
     cc1101_deselect(dev);
 
-    /* 2. Wait ≥40us for voltage regulator to stabilize */
     esp_rom_delay_us(45);
 
-    /* 3. Pull CS low, wait for MISO to go low (chip ready) */
     cc1101_select(dev);
     esp_err_t ret = ESP_OK;
     int timeout = 100000;
@@ -267,7 +264,6 @@ esp_err_t cc1101_reset(cc1101_handle_t *dev)
     };
     spi_device_polling_transmit(dev->spi, &t);
 
-    /* 5. Wait for MISO to go low again (reset complete) */
     timeout = 100000;
     while (gpio_get_level(dev->miso_pin)) {
         if (--timeout <= 0) {
@@ -299,16 +295,20 @@ esp_err_t cc1101_configure(cc1101_handle_t *dev,
     /* Channel */
     cc1101_set_channel(dev, cfg->channel);
 
-    /* PA power — OOK needs PATABLE[0]=OFF, PATABLE[7]=ON */
+    /* PA power */
     if (cfg->modem.modulation == CC1101_MOD_ASK_OOK) {
+        /* OOK: PATABLE[0]=OFF (bit=0), PATABLE[7]=PA (bit=1) */
         uint8_t pa_table[8] = {0};
-        pa_table[0] = 0x00;        /* PA OFF for bit=0 */
-        pa_table[7] = cfg->pa_value; /* PA ON for bit=1 */
+        pa_table[0] = 0x00;
+        pa_table[7] = cfg->pa_value;
         cc1101_write_burst(dev, CC1101_PATABLE, pa_table, 8);
-        /* FREND0[1:0]=01 → TX uses PATABLE[7] (the ON value) */
         cc1101_write_reg(dev, CC1101_FREND0, 0x11);
     } else {
+        /* FSK/GFSK/MSK/4FSK: PATABLE[0]=PA, FREND0 LPA=00 */
         cc1101_set_tx_power(dev, cfg->pa_value);
+        uint8_t frend0 = cc1101_read_reg(dev, CC1101_FREND0);
+        frend0 = (frend0 & 0xFC) | 0x00;
+        cc1101_write_reg(dev, CC1101_FREND0, frend0);
     }
 
     /* Modem */
@@ -339,10 +339,19 @@ esp_err_t cc1101_configure(cc1101_handle_t *dev,
     cc1101_write_reg(dev, CC1101_PKTCTRL1,
                      (cfg->packet.append_status ? CC1101_APPEND_STATUS : 0) |
                      (cfg->packet.addr_check & CC1101_ADR_CHK_0_255_BCAST));
+
+    /* Build PKTCTRL0: bits[4:3]=PKT_FORMAT, bits[2:1]=LENGTH_CONFIG, bit[0]=CRC_EN */
+    uint8_t pkt_format = CC1101_PKT_FORMAT_NORMAL;
+    uint8_t pkt_len;
+    switch (cfg->packet.mode) {
+        case CC1101_PKT_VARIABLE_E: pkt_len = CC1101_PKTLEN_VARIABLE; break;
+        case CC1101_PKT_INFINITE_E: pkt_len = CC1101_PKTLEN_INFINITE; break;
+        default:                    pkt_len = CC1101_PKTLEN_FIXED;    break;
+    }
     cc1101_write_reg(dev, CC1101_PKTCTRL0,
+                     pkt_format | pkt_len |
                      (cfg->packet.crc_enable ? CC1101_CRC_ENABLE : 0) |
-                     (cfg->packet.whitening ? CC1101_DATA_WHITENING : 0) |
-                     (cfg->packet.mode & 0x03));
+                     (cfg->packet.whitening ? CC1101_DATA_WHITENING : 0));
 
     /* Radio control */
     cc1101_write_reg(dev, CC1101_MCSM0, cfg->radio.autocal);
@@ -373,12 +382,11 @@ esp_err_t cc1101_configure(cc1101_handle_t *dev,
 
 void cc1101_config(cc1101_handle_t *dev)
 {
-    /* Default config for backward compat with sniffer */
     cc1101_write_reg(dev, CC1101_IOCFG2, CC1101_GDO_SYNC_WORD);
     cc1101_write_reg(dev, CC1101_IOCFG0, CC1101_GDO_SYNC_WORD);
     cc1101_write_reg(dev, CC1101_PKTLEN, 255);
     cc1101_write_reg(dev, CC1101_PKTCTRL1, CC1101_APPEND_STATUS | CC1101_ADR_CHK_NONE);
-    cc1101_write_reg(dev, CC1101_PKTCTRL0, CC1101_CRC_ENABLE | CC1101_PKT_VARIABLE);
+    cc1101_write_reg(dev, CC1101_PKTCTRL0, CC1101_CRC_ENABLE | CC1101_PKTLEN_VARIABLE);
     cc1101_set_frequency(dev, 433920000);
     cc1101_write_reg(dev, CC1101_MDMCFG4, CC1101_MDMCFG4_VALUE(3, 0, 10));
     cc1101_write_reg(dev, CC1101_MDMCFG3, CC1101_MDMCFG3_VALUE(131));
@@ -620,7 +628,6 @@ void cc1101_verify_config(cc1101_handle_t *dev, const cc1101_config_t *cfg)
 {
     ESP_LOGI(TAG, "==== REGISTER VERIFICATION ====");
 
-    /* Compute expected values */
     uint32_t freq_reg = (uint32_t)(((uint64_t)cfg->freq_hz << 16) / 26000000ULL);
     uint8_t exp_freq2 = (freq_reg >> 16) & 0xFF;
 
@@ -646,7 +653,9 @@ void cc1101_verify_config(cc1101_handle_t *dev, const cc1101_config_t *cfg)
         { CC1101_PKTLEN,  "PKTLEN ", cfg->packet.max_length },
         { CC1101_PKTCTRL0,"PKTCTRL0", (cfg->packet.crc_enable ? CC1101_CRC_ENABLE : 0) |
                                        (cfg->packet.whitening ? CC1101_DATA_WHITENING : 0) |
-                                       (cfg->packet.mode & 0x03) },
+                                       ((cfg->packet.mode == CC1101_PKT_VARIABLE_E) ? CC1101_PKTLEN_VARIABLE :
+                                        (cfg->packet.mode == CC1101_PKT_INFINITE_E) ? CC1101_PKTLEN_INFINITE :
+                                        CC1101_PKTLEN_FIXED) },
         { CC1101_MDMCFG4, "MDMCFG4", exp_mdmcfg4 },
         { CC1101_MDMCFG3, "MDMCFG3", drate_m },
         { CC1101_MDMCFG2, "MDMCFG2", exp_mdmcfg2 },

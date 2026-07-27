@@ -2,10 +2,19 @@ menu "CC1101 Hardware Pinout"
 
     config CC1101_PIN_GDO0
         int "GDO0 pin"
+        default 3
+        range 0 48
+        help
+            GPIO pin connected to CC1101 GDO0 (interrupt / data output).
+
+    
+    config CC1101_PIN_GDO2
+        int "GDO2 pin"
         default 4
         range 0 48
         help
             GPIO pin connected to CC1101 GDO0 (interrupt / data output).
+
 
     config CC1101_PIN_CS
         int "CS (chip select) pin"

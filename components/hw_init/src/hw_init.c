@@ -61,3 +61,22 @@ esp_err_t hw_init_gdo0_input(void)
              PIN_NUM_GDO0, gpio_get_level(PIN_NUM_GDO0));
     return ESP_OK;
 }
+
+esp_err_t hw_init_gdo2_input(void)
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << PIN_NUM_GDO2),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t ret = gpio_config(&io_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GDO2 config failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG, "GDO2 (GPIO %d) configured as input, level=%d",
+             PIN_NUM_GDO2, gpio_get_level(PIN_NUM_GDO2));
+    return ESP_OK;
+}

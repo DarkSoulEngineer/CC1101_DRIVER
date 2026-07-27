@@ -76,9 +76,9 @@ menu "CC1101 Radio Configuration"
 
     config CC1101_SYNC_WORD
         int "Sync word (16-bit decimal)"
-        default 45022
+        default 57007
         help
-            16-bit sync word sent MSB first. 45022 = 0xAFDE.
+            16-bit sync word sent MSB first. 57007 = 0xDEAF.
 
     config CC1101_PREAMBLE_BYTES
         int "Preamble bytes"

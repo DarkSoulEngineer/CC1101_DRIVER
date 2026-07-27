@@ -64,3 +64,13 @@ Session.vim
 ehthumbs.db
 Thumbs.db
 .directory
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+*.egg-info/

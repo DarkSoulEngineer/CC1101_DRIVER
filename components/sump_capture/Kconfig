@@ -1,0 +1,150 @@
+menu "SUMP Capture"
+
+    choice SUMP_TRANSPORT
+        prompt "OLS transport (serial interface)"
+        default SUMP_TRANSPORT_USB
+        help
+            Select which serial interface carries the SUMP/OLS protocol.
+
+            USB mode: OLS on USB Serial JTAG (COM6), console on UART0 (COM7).
+                      Use Python capture script (capture_sump.py) on COM6.
+
+            UART mode: OLS on UART0 (COM7), console on USB Serial JTAG (COM6).
+                       Use PulseView with OLS driver on COM7.
+
+            IMPORTANT: also change ESP Console setting to match:
+              USB mode   → CONFIG_ESP_CONSOLE_UART_DEFAULT (console on UART0)
+              UART mode  → CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG (console on USB JTAG)
+
+        config SUMP_TRANSPORT_USB
+            bool "USB Serial JTAG (for Python VCD capture)"
+            help
+                OLS protocol uses USB Serial JTAG (typically COM6).
+                Python script connects here for fast VCD capture.
+                IDF console routes to UART0 (COM7).
+
+        config SUMP_TRANSPORT_UART
+            bool "UART0 (for PulseView OLS driver)"
+            help
+                OLS protocol uses UART0 (typically COM7).
+                PulseView connects here via OLS driver.
+                IDF console routes to USB Serial JTAG (COM6).
+
+    endchoice
+
+    config SUMP_UART_BAUD
+        int "UART baud rate"
+        default 921600
+        range 115200 3000000
+        depends on SUMP_TRANSPORT_UART
+        help
+            Baud rate for UART0 OLS transport.
+            Higher = faster data upload from device to host.
+            921600 recommended; PulseView supports up to 3 Mbaud.
+
+    config SUMP_CLOCK_FREQ
+        int "SUMP reference clock frequency (Hz)"
+        default 240000000
+        help
+            Reference clock frequency for SUMP divider calculation.
+            Sample rate = clock_freq / (divider + 1).
+
+    config SUMP_MAX_SAMPLES
+        int "Maximum samples per channel"
+        default 262144
+        range 1000 4000000
+        help
+            Maximum number of samples per channel in the capture buffer.
+            With 2ch GDMA each sample = 1 byte raw, repacked on upload.
+            Total DMA buffer = CHUNK_SIZE * 2 (ping-pong).
+            262144 = ~32KB per channel after repack.
+
+    config SUMP_NUM_CHANNELS
+        int "Number of SUMP channels (1 or 2)"
+        default 2
+        range 1 2
+        help
+            Number of channels to capture.
+            1 = GDO0 only (demodulated async data).
+            2 = GDO0 + GDO2 (configurable second signal).
+
+    config SUMP_GDO2_MODE
+        int "GDO2 output mode (IOCFG2 register value)"
+        default 6
+        range 0 47
+        help
+            CC1101 IOCFG2 output mode for the 2nd SUMP channel.
+            Common values:
+              0x06 = Sync word detect (packet timing reference)
+              0x07 = CRC OK (data quality indicator)
+              0x08 = PLL lock (carrier detect)
+              0x0B = RSSI valid (signal presence)
+              0x0D = Async data (raw demodulated bits, same as GDO0)
+              0x2E = High-Z (disabled, 1-channel mode)
+
+    config SUMP_GDO2_PIN
+        int "GDO2 GPIO pin"
+        default 4
+        range 0 48
+        help
+            GPIO pin connected to CC1101 GDO2 for the 2nd SUMP channel.
+
+    config SUMP_DTR_RESET_GUARD
+        bool "DTR/RTS reset guard (software)"
+        default y
+        help
+            When PulseView opens the serial port it toggles DTR/RTS,
+            resetting the ESP32. This guard adds an extended drain
+            delay after boot to absorb stale commands and boot output
+            before the SUMP protocol handler starts.
+            Disable if you install a 10uF cap on EN->GND.
+
+    config SUMP_DTR_GUARD_MS
+        int "Guard drain time (ms)"
+        default 2000
+        range 500 10000
+        depends on SUMP_DTR_RESET_GUARD
+        help
+            How long to drain the serial buffer after USB JTAG driver
+            install, before entering the SUMP command loop.
+
+    menu "GDMA / Signal Capture"
+
+        config SUMP_PCLK_PIN
+            int "PCLK generation GPIO (LEDC output, self-loopback)"
+            default 8
+            range 0 48
+            help
+                GPIO pin used to generate the sample clock via LEDC.
+                This pin is configured as input+output; the LEDC square
+                wave output loops back through the GPIO matrix to the
+                peripheral's PCLK input. Must be free.
+
+        config SUMP_SIG_DE_PIN
+            int "Data-enable tie-high GPIO"
+            default 9
+            range 0 48
+            help
+                GPIO pin tied high and routed to the peripheral's
+                data-enable input. Keeps the sampler capturing continuously.
+
+        config SUMP_SIG_HSYNC_PIN
+            int "HSYNC tie-high GPIO"
+            default 10
+            range 0 48
+            help
+                GPIO pin tied high and routed to the peripheral's
+                HSYNC input. Required for VH/DE mode operation.
+
+        config SUMP_DMA_CHUNK_SIZE
+            int "DMA transfer chunk size (bytes)"
+            default 4000
+            range 256 4092
+            help
+                Size of each DMA descriptor buffer (max 4092).
+                The peripheral fires an EOF interrupt after this many bytes.
+                Smaller = lower latency, larger = less overhead.
+
+    endmenu
+
+endmenu

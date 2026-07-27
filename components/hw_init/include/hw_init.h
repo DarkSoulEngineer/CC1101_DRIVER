@@ -9,7 +9,13 @@
 #ifdef CONFIG_CC1101_PIN_GDO0
 #define PIN_NUM_GDO0 CONFIG_CC1101_PIN_GDO0
 #else
-#define PIN_NUM_GDO0 4
+#define PIN_NUM_GDO0 3
+#endif
+
+#ifdef CONFIG_CC1101_PIN_GDO2
+#define PIN_NUM_GDO2 CONFIG_CC1101_PIN_GDO2
+#else
+#define PIN_NUM_GDO2 4
 #endif
 
 #ifdef CONFIG_CC1101_PIN_CS
@@ -46,5 +52,6 @@ extern spi_device_handle_t cc1101_handle;
 
 esp_err_t init_hardware(void);
 esp_err_t hw_init_gdo0_input(void);
+esp_err_t hw_init_gdo2_input(void);
 
 #endif

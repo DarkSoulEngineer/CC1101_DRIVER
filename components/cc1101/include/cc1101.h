@@ -126,7 +126,7 @@
 #define CC1101_GDO_TXFIFO_UNDERFLOW   0x03
 #define CC1101_GDO_SYNC_WORD          0x06
 #define CC1101_GDO_CRC_OK             0x07
-#define CC1101_GDO_CARRIER_SENSE      0x0E
+#define CC1101_GDO_ASYNC_DATA         0x0D
 #define CC1101_GDO_HIGH_Z             0x2E
 #define CC1101_GDO_HW0                0x2F
 
@@ -137,8 +137,18 @@
 #define CC1101_PKT_FIXED              0x00
 #define CC1101_PKT_VARIABLE           0x01
 #define CC1101_PKT_INFINITE           0x02
-#define CC1101_CRC_ENABLE             (1 << 2)
+#define CC1101_CRC_ENABLE             (1 << 0)
 #define CC1101_DATA_WHITENING         (1 << 6)
+
+/* PKTCTRL0 PKT_FORMAT (bits [4:3]) */
+#define CC1101_PKT_FORMAT_NORMAL      (0 << 3)
+#define CC1101_PKT_FORMAT_ASYNC       (1 << 3)
+#define CC1101_PKT_FORMAT_RANDOM      (2 << 3)
+
+/* PKTCTRL0 LENGTH_CONFIG (bits [2:1]) */
+#define CC1101_PKTLEN_FIXED           (0 << 1)
+#define CC1101_PKTLEN_VARIABLE        (1 << 1)
+#define CC1101_PKTLEN_INFINITE        (2 << 1)
 
 #define CC1101_APPEND_STATUS          (1 << 2)
 #define CC1101_ADR_CHK_NONE           0x00
