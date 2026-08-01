@@ -1412,6 +1412,7 @@ CONFIG_SPI_SLAVE_ISR_IN_IRAM=y
 #
 # ESP-Driver:USB Serial/JTAG Configuration
 #
+# default:
 CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
 # end of ESP-Driver:USB Serial/JTAG Configuration
 
@@ -3588,84 +3589,6 @@ CONFIG_WL_SECTOR_SIZE=4096
 # end of Wear Levelling
 
 #
-# USB Interface (USB Serial/JTAG)
-#
-# default:
-CONFIG_USB_INTERFACE_USJ_TX_BUFFER_SIZE=4096
-# default:
-CONFIG_USB_INTERFACE_USJ_RX_BUFFER_SIZE=256
-# end of USB Interface (USB Serial/JTAG)
-
-#
-# CC1101 Radio Configuration
-#
-# default:
-CONFIG_CC1101_FREQ_433=y
-# default:
-# CONFIG_CC1101_FREQ_868 is not set
-# default:
-# CONFIG_CC1101_FREQ_915 is not set
-# default:
-CONFIG_CC1101_FREQ_HZ=0
-# default:
-CONFIG_CC1101_MOD_2FSK=y
-# default:
-# CONFIG_CC1101_MOD_GFSK is not set
-# default:
-# CONFIG_CC1101_MOD_ASK_OOK is not set
-# default:
-# CONFIG_CC1101_MOD_4FSK is not set
-# default:
-# CONFIG_CC1101_MOD_MSK is not set
-# default:
-CONFIG_CC1101_DATARATE=2400
-# default:
-CONFIG_CC1101_DEVIATION=4
-# default:
-CONFIG_CC1101_CHANNEL_BW=12
-# default:
-CONFIG_CC1101_SYNC_MODE=2
-# default:
-CONFIG_CC1101_SYNC_WORD=57007
-# default:
-CONFIG_CC1101_PREAMBLE_BYTES=4
-# default:
-CONFIG_CC1101_PKT_FIXED=y
-# default:
-# CONFIG_CC1101_PKT_VARIABLE is not set
-# default:
-# CONFIG_CC1101_PKT_INFINITE is not set
-# default:
-# CONFIG_CC1101_CRC_ENABLE is not set
-# default:
-# CONFIG_CC1101_WHITENING is not set
-# default:
-# CONFIG_CC1101_APPEND_STATUS is not set
-# default:
-# CONFIG_CC1101_PA_neg30dBm is not set
-# default:
-# CONFIG_CC1101_PA_neg20dBm is not set
-# default:
-# CONFIG_CC1101_PA_neg15dBm is not set
-# default:
-# CONFIG_CC1101_PA_neg10dBm is not set
-# default:
-# CONFIG_CC1101_PA_0dBm is not set
-# default:
-# CONFIG_CC1101_PA_5dBm is not set
-# default:
-# CONFIG_CC1101_PA_7dBm is not set
-# default:
-CONFIG_CC1101_PA_10dBm=y
-# default:
-# CONFIG_CC1101_PA_12dBm is not set
-# default:
-CONFIG_CC1101_PA_VALUE=0
-# default:
-# CONFIG_CC1101_ISR_ENABLE is not set
-# end of CC1101 Radio Configuration
-
-#
 # CC1101 Hardware Pinout
 #
 # default:
@@ -3685,26 +3608,11 @@ CONFIG_CC1101_SPI_HZ=1000000
 # end of CC1101 Hardware Pinout
 
 #
-# SUMP Capture
+# USB Interface (USB Serial/JTAG)
 #
-CONFIG_SUMP_TRANSPORT_USB=y
-# CONFIG_SUMP_TRANSPORT_UART is not set
-CONFIG_SUMP_UART_BAUD=115200
-# default:
-CONFIG_SUMP_CLOCK_FREQ=240000000
-# default:
-CONFIG_SUMP_MAX_SAMPLES=262144
-# default:
-CONFIG_SUMP_NUM_CHANNELS=2
-# default:
-CONFIG_SUMP_GDO2_MODE=6
-# default:
-CONFIG_SUMP_GDO2_PIN=4
-# default:
-CONFIG_SUMP_DTR_RESET_GUARD=y
-# default:
-CONFIG_SUMP_DTR_GUARD_MS=2000
-# end of SUMP Capture
+CONFIG_USB_INTERFACE_USJ_TX_BUFFER_SIZE=512
+CONFIG_USB_INTERFACE_USJ_RX_BUFFER_SIZE=512
+# end of USB Interface (USB Serial/JTAG)
 # end of Component config
 
 # default:

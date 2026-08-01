@@ -140,15 +140,15 @@
 #define CC1101_CRC_ENABLE             (1 << 0)
 #define CC1101_DATA_WHITENING         (1 << 6)
 
-/* PKTCTRL0 PKT_FORMAT (bits [4:3]) */
-#define CC1101_PKT_FORMAT_NORMAL      (0 << 3)
-#define CC1101_PKT_FORMAT_ASYNC       (1 << 3)
-#define CC1101_PKT_FORMAT_RANDOM      (2 << 3)
+/* PKTCTRL0 PKT_FORMAT (bits [5:4]) */
+#define CC1101_PKT_FORMAT_NORMAL      (0 << 4)
+#define CC1101_PKT_FORMAT_ASYNC       (1 << 4)
+#define CC1101_PKT_FORMAT_RANDOM      (2 << 4)
 
-/* PKTCTRL0 LENGTH_CONFIG (bits [2:1]) */
-#define CC1101_PKTLEN_FIXED           (0 << 1)
-#define CC1101_PKTLEN_VARIABLE        (1 << 1)
-#define CC1101_PKTLEN_INFINITE        (2 << 1)
+/* PKTCTRL0 LENGTH_CONFIG (bits [3:2]) */
+#define CC1101_PKTLEN_FIXED           (0 << 2)
+#define CC1101_PKTLEN_VARIABLE        (1 << 2)
+#define CC1101_PKTLEN_INFINITE        (2 << 2)
 
 #define CC1101_APPEND_STATUS          (1 << 2)
 #define CC1101_ADR_CHK_NONE           0x00
@@ -521,6 +521,7 @@ static inline cc1101_config_t cc1101_default_config(void)
  * ============================================================ */
 
 void    cc1101_write_reg(cc1101_handle_t *dev, uint8_t reg, uint8_t value);
+/* cc1101_write_burst is static — use cc1101_write_fifo for FIFO writes */
 uint8_t cc1101_read_reg(cc1101_handle_t *dev, uint8_t reg);
 uint8_t cc1101_strobe(cc1101_handle_t *dev, uint8_t strobe);
 uint8_t cc1101_read_status_reg(cc1101_handle_t *dev, uint8_t reg);

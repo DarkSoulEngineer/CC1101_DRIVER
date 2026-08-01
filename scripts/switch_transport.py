@@ -2,8 +2,8 @@
 """
 Switch RFuzz SUMP transport mode between USB and UART.
 
-  USB mode:  OLS protocol on USB Serial JTAG (COM6) — use with capture_sump.py
-  UART mode: OLS protocol on UART0 (COM7) — use with PulseView OLS driver
+  USB mode:  OLS protocol on USB Serial JTAG (COM7) — use with capture_sump.py
+  UART mode: OLS protocol on UART0 (COM6) — use with PulseView OLS driver
 
 After switching, rebuild and flash:
     python switch_transport.py usb && idf.py build && idf.py flash
@@ -22,13 +22,13 @@ UART_DEFAULTS = """\
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
-# OLS transport: UART0 (COM7) for PulseView, USB Serial JTAG (COM6) for console
+# OLS transport: UART0 (COM6) for PulseView, USB Serial JTAG (COM7) for console
 CONFIG_SUMP_TRANSPORT_UART=y
 CONFIG_SUMP_UART_BAUD=921600
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
-# Enable IDF logs on USB Serial JTAG (COM6) for debugging
+# Enable IDF logs on USB Serial JTAG (COM7) for debugging
 CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
@@ -40,13 +40,13 @@ USB_DEFAULTS = """\
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
-# OLS transport: USB Serial JTAG (COM6) for Python capture, UART0 (COM7) for console
+# OLS transport: USB Serial JTAG (COM7) for Python capture, UART0 (COM6) for console
 CONFIG_SUMP_TRANSPORT_USB=y
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_NUM=0
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
-# Enable IDF logs on UART0 (COM7) for debugging
+# Enable IDF logs on UART0 (COM6) for debugging
 CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 """
@@ -55,10 +55,10 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 def switch(mode):
     if mode == "uart":
         content = UART_DEFAULTS
-        info = "UART mode: PulseView on COM7, debug on COM6"
+        info = "UART mode: PulseView on COM6, debug on COM7"
     elif mode == "usb":
         content = USB_DEFAULTS
-        info = "USB mode: capture_sump.py on COM6, debug on COM7"
+        info = "USB mode: capture_sump.py on COM7, debug on COM6"
     else:
         print(f"Unknown mode: {mode}")
         print("Usage: python switch_transport.py [uart|usb]")

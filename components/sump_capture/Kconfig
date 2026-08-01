@@ -6,41 +6,66 @@ menu "SUMP Capture"
         help
             Select which serial interface carries the SUMP/OLS protocol.
 
-            USB mode: OLS on USB Serial JTAG (COM6), console on UART0 (COM7).
-                      Use Python capture script (capture_sump.py) on COM6.
+            *** RECOMMENDED: USB Serial JTAG ***
 
-            UART mode: OLS on UART0 (COM7), console on USB Serial JTAG (COM6).
-                       Use PulseView with OLS driver on COM7.
+            USB mode: OLS on USB Serial JTAG (typically COM6).
+                      PulseView connects here via OLS driver.
+                      Console on UART0 (typically COM7).
+
+            UART mode: OLS on UART0 (typically COM7).
+                       CAUTION: When PulseView opens a COM port it
+                       asserts DTR/RTS, which on ESP32 dev boards are
+                       wired to EN (reset) and BOOT.  This causes a
+                       hardware reset.  The ROM bootloader then prints
+                       boot text at 115200 baud, which PulseView reads
+                       as garbage at 921600 baud and concludes nothing
+                       is connected.  Use USB mode instead, or install
+                       a 10uF cap between EN and GND to suppress the
+                       reset.
 
             IMPORTANT: also change ESP Console setting to match:
-              USB mode   → CONFIG_ESP_CONSOLE_UART_DEFAULT (console on UART0)
-              UART mode  → CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG (console on USB JTAG)
+              USB mode   -> CONFIG_ESP_CONSOLE_UART_DEFAULT (console on UART0)
+              UART mode  -> CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG (console on USB JTAG)
 
         config SUMP_TRANSPORT_USB
-            bool "USB Serial JTAG (for Python VCD capture)"
+            bool "USB Serial JTAG (Recommended)"
             help
                 OLS protocol uses USB Serial JTAG (typically COM6).
-                Python script connects here for fast VCD capture.
-                IDF console routes to UART0 (COM7).
+                This is the recommended mode because the native USB
+                peripheral does not route through a USB-UART bridge,
+                so opening the port never triggers a hardware reset.
+                PulseView connects here via the OLS driver.
+                IDF console routes to UART0 (typically COM7).
 
         config SUMP_TRANSPORT_UART
-            bool "UART0 (for PulseView OLS driver)"
+            bool "UART0 (DTR reset risk -- not recommended)"
             help
                 OLS protocol uses UART0 (typically COM7).
-                PulseView connects here via OLS driver.
-                IDF console routes to USB Serial JTAG (COM6).
+                WARNING: PulseView will toggle DTR when opening this
+                port, causing the ESP32 to reset.  The ROM bootloader
+                boot text will then corrupt the SUMP handshake.  To
+                use this mode you MUST either:
+                  (a) install a 10uF capacitor on EN->GND, or
+                  (b) use the DTR reset guard (CONFIG_SUMP_DTR_RESET_GUARD).
+                USB Serial JTAG mode avoids this entirely.
 
     endchoice
 
     config SUMP_UART_BAUD
-        int "UART baud rate"
-        default 921600
-        range 115200 3000000
-        depends on SUMP_TRANSPORT_UART
+        int "UART console / fallback baud rate"
+        default 15200
+        range 9600 3000000
         help
-            Baud rate for UART0 OLS transport.
-            Higher = faster data upload from device to host.
-            921600 recommended; PulseView supports up to 3 Mbaud.
+            Baud rate used when the SUMP transport is set to UART0,
+            and also the baud rate of the UART console in USB mode.
+
+            When using USB Serial JTAG mode this controls the IDF
+            console on UART0 (the "UART" port).  PulseView does NOT
+            use this -- it talks over USB -- so it has no effect on the
+            SUMP handshake in USB mode.
+
+            When using UART0 mode this is the SUMP/OLS baud rate.
+            MUST match the baud rate you select in PulseView.
 
     config SUMP_CLOCK_FREQ
         int "SUMP reference clock frequency (Hz)"
@@ -51,13 +76,12 @@ menu "SUMP Capture"
 
     config SUMP_MAX_SAMPLES
         int "Maximum samples per channel"
-        default 262144
+        default 100000
         range 1000 4000000
         help
             Maximum number of samples per channel in the capture buffer.
-            With 2ch GDMA each sample = 1 byte raw, repacked on upload.
-            Total DMA buffer = CHUNK_SIZE * 2 (ping-pong).
-            262144 = ~32KB per channel after repack.
+            With timer ISR, raw samples are packed 8 per byte in ISR.
+            Memory = (MAX_SAMPLES / 8) * num_channels bytes.
 
     config SUMP_NUM_CHANNELS
         int "Number of SUMP channels (1 or 2)"
@@ -93,58 +117,26 @@ menu "SUMP Capture"
         bool "DTR/RTS reset guard (software)"
         default y
         help
-            When PulseView opens the serial port it toggles DTR/RTS,
-            resetting the ESP32. This guard adds an extended drain
-            delay after boot to absorb stale commands and boot output
-            before the SUMP protocol handler starts.
-            Disable if you install a 10uF cap on EN->GND.
+            When PulseView opens a serial port it toggles DTR/RTS,
+            which on many ESP32 dev boards resets the chip via the
+            CH340/CP2102 bridge.  The ROM bootloader then prints boot
+            text at 115200 baud that corrupts the SUMP handshake at
+            921600 baud.  This guard drains the serial buffer for an
+            extended period after boot to absorb the stale output.
+            RECOMMENDED: use USB Serial JTAG mode instead -- it avoids
+            the DTR reset entirely because it bypasses the bridge chip.
 
     config SUMP_DTR_GUARD_MS
         int "Guard drain time (ms)"
-        default 2000
+        default 3000
         range 500 10000
         depends on SUMP_DTR_RESET_GUARD
         help
             How long to drain the serial buffer after USB JTAG driver
-            install, before entering the SUMP command loop.
-
-    menu "GDMA / Signal Capture"
-
-        config SUMP_PCLK_PIN
-            int "PCLK generation GPIO (LEDC output, self-loopback)"
-            default 8
-            range 0 48
-            help
-                GPIO pin used to generate the sample clock via LEDC.
-                This pin is configured as input+output; the LEDC square
-                wave output loops back through the GPIO matrix to the
-                peripheral's PCLK input. Must be free.
-
-        config SUMP_SIG_DE_PIN
-            int "Data-enable tie-high GPIO"
-            default 9
-            range 0 48
-            help
-                GPIO pin tied high and routed to the peripheral's
-                data-enable input. Keeps the sampler capturing continuously.
-
-        config SUMP_SIG_HSYNC_PIN
-            int "HSYNC tie-high GPIO"
-            default 10
-            range 0 48
-            help
-                GPIO pin tied high and routed to the peripheral's
-                HSYNC input. Required for VH/DE mode operation.
-
-        config SUMP_DMA_CHUNK_SIZE
-            int "DMA transfer chunk size (bytes)"
-            default 4000
-            range 256 4092
-            help
-                Size of each DMA descriptor buffer (max 4092).
-                The peripheral fires an EOF interrupt after this many bytes.
-                Smaller = lower latency, larger = less overhead.
-
-    endmenu
+            install, before entering the SUMP command loop.  The ROM
+            bootloader prints ~300 bytes of boot text; at 921600 baud
+            that takes about 4 ms, but we also need margin for the
+            host to open the port.  3000 ms is safe; lower values
+            risk missing the first SUMP command.
 
 endmenu

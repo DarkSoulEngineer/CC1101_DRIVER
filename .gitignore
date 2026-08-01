@@ -31,6 +31,8 @@ partition_table/
 *.raw
 *.pcap
 *.csv
+*.sr
+capture_*.bin
 logs/
 *.log
 

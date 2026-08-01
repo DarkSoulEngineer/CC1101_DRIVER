@@ -1,0 +1,20 @@
+menu "USB Interface (USB Serial/JTAG)"
+
+    config USB_INTERFACE_USJ_TX_BUFFER_SIZE
+        int "USB Serial/JTAG TX ring buffer size (bytes)"
+        default 4096
+        range 256 16384
+        help
+            Ring buffer size for the USB Serial/JTAG TX direction
+            (data sent from device to host). Keep it well above the
+            streaming chunk size (see sump_capture transport_write).
+
+    config USB_INTERFACE_USJ_RX_BUFFER_SIZE
+        int "USB Serial/JTAG RX ring buffer size (bytes)"
+        default 256
+        range 64 4096
+        help
+            Ring buffer size for the USB Serial/JTAG RX direction
+            (data received from host).
+
+endmenu

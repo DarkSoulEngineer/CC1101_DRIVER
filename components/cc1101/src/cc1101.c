@@ -382,11 +382,11 @@ esp_err_t cc1101_configure(cc1101_handle_t *dev,
 
 void cc1101_config(cc1101_handle_t *dev)
 {
-    cc1101_write_reg(dev, CC1101_IOCFG2, CC1101_GDO_SYNC_WORD);
-    cc1101_write_reg(dev, CC1101_IOCFG0, CC1101_GDO_SYNC_WORD);
+    cc1101_write_reg(dev, CC1101_IOCFG2, CC1101_GDO_ASYNC_DATA);
+    cc1101_write_reg(dev, CC1101_IOCFG0, CC1101_GDO_ASYNC_DATA);
     cc1101_write_reg(dev, CC1101_PKTLEN, 255);
     cc1101_write_reg(dev, CC1101_PKTCTRL1, CC1101_APPEND_STATUS | CC1101_ADR_CHK_NONE);
-    cc1101_write_reg(dev, CC1101_PKTCTRL0, CC1101_CRC_ENABLE | CC1101_PKTLEN_VARIABLE);
+    cc1101_write_reg(dev, CC1101_PKTCTRL0, CC1101_PKT_FORMAT_ASYNC | CC1101_CRC_ENABLE | CC1101_PKTLEN_VARIABLE);
     cc1101_set_frequency(dev, 433920000);
     cc1101_write_reg(dev, CC1101_MDMCFG4, CC1101_MDMCFG4_VALUE(3, 0, 10));
     cc1101_write_reg(dev, CC1101_MDMCFG3, CC1101_MDMCFG3_VALUE(131));

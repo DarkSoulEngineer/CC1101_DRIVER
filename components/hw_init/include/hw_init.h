@@ -2,9 +2,11 @@
 #define HW_INIT_H
 
 #include "driver/gpio.h"
-#include "driver/spi_master.h"
 #include "esp_err.h"
 #include "sdkconfig.h"
+
+#include "spi_init.h"
+#include "usb_interface.h"
 
 #ifdef CONFIG_CC1101_PIN_GDO0
 #define PIN_NUM_GDO0 CONFIG_CC1101_PIN_GDO0
@@ -47,8 +49,6 @@
 #else
 #define CC1101_SPI_SPEED_HZ 1000000
 #endif
-
-extern spi_device_handle_t cc1101_handle;
 
 esp_err_t init_hardware(void);
 esp_err_t hw_init_gdo0_input(void);

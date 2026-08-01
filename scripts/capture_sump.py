@@ -5,12 +5,12 @@ CC1101 SUMP Capture — talks SUMP/OLS protocol to ESP32-S3 logic analyzer.
 Supports 1 or 2 channels (GDO0 + GDO2).
 
 Transport modes (set via firmware Kconfig: SUMP_TRANSPORT_USB / SUMP_TRANSPORT_UART):
-  USB mode  (default): OLS on USB Serial JTAG (COM6), use --port COM6
-  UART mode:           OLS on UART0 (COM7), use --port COM7
+  USB mode  (default): OLS on USB Serial JTAG (COM7), use --port COM7
+  UART mode:           OLS on UART0 (COM6), use --port COM6
 
 Usage:
-    python capture_sump.py                         # default COM6, 24kHz, 2ch
-    python capture_sump.py --port COM7             # custom port (e.g. UART mode)
+    python capture_sump.py                         # default COM7, 24kHz, 2ch
+    python capture_sump.py --port COM6             # custom port (e.g. UART mode)
     python capture_sump.py --samples 500000        # 500k samples
     python capture_sump.py --rate 100000           # 100 kHz sample rate
     python capture_sump.py --channels 1            # single channel
@@ -35,6 +35,7 @@ except ImportError:
 SUMP_CMD_RESET     = 0x00
 SUMP_CMD_RUN       = 0x01
 SUMP_CMD_ID        = 0x02
+SUMP_CMD_SELFTEST  = 0x03
 SUMP_CMD_SET_DIV   = 0x80
 SUMP_CMD_SET_COUNT = 0x81
 SUMP_CMD_SET_FLAGS = 0x82
@@ -92,7 +93,8 @@ def sump_get_metadata(ser):
         i += 2 + length
 
     if 0x01 in meta:
-        print(f"[+] Device name: {meta[0x01].decode('ascii', errors='replace')}")
+        name = meta[0x01].decode('ascii', errors='replace').rstrip('\x00')
+        print(f"[+] Device name: {name}")
     if 0x02 in meta:
         print(f"[+] Version: {meta[0x02].decode('ascii', errors='replace')}")
     if 0x40 in meta:
@@ -288,47 +290,47 @@ def save_hex(ch0, ch1, sample_rate, filename):
 
 
 def save_sr(ch0, ch1, sample_rate, filename):
-    """Save as Sigrok .sr session file."""
-    def pack_bits(samples):
-        packed = bytearray()
-        for i in range(0, len(samples), 8):
-            byte = 0
-            for bit in range(8):
-                if i + bit < len(samples) and samples[i + bit]:
-                    byte |= (1 << bit)
-            packed.append(byte)
-        return packed
+    """Save as Sigrok .sr session file (srzip v2, PulseView compatible).
 
+    Internal structure:
+      version       - contains "2"
+      metadata      - INI-style with [global] and [device 1]
+      logic-1-1     - raw packed logic data (1 byte = 1 timestep, bits = channels)
+    """
     ch_count = 2 if ch1 else 1
-    packed = pack_bits(ch0)
+    num_samples = len(ch0)
+
+    # Pack: each byte = 1 timestep, bit0=ch0, bit1=ch1
+    packed = bytearray()
+    for i in range(num_samples):
+        byte = 0
+        if ch0[i]:
+            byte |= 0x01
+        if ch1 and i < len(ch1) and ch1[i]:
+            byte |= 0x02
+        packed.append(byte)
 
     metadata = (
-        "[driver sigrok-session]\n"
-        "sigrok-version=0.7.2\n"
+        "[global]\n"
+        "sigrok version = 2\n"
         "\n"
         "[device 1]\n"
-        "driver=virtual\n"
-        "connection-type=parallel\n"
-        "channels=%d\n"
-        "channel_1=GDO0\n"
-    ) % ch_count
-
-    if ch1:
-        metadata += "channel_2=GDO2\n"
-
-    metadata += (
-        "total_samples=%d\n"
-        "samplerate=%d\n"
-        "unitsize=1\n"
-    ) % (len(ch0), sample_rate)
+        "capturefile = logic-1-1\n"
+        "unitsize = 1\n"
+        "total probes = %d\n"
+        "total analog = 0\n"
+        "samplerate = %d\n"
+        "probe1 = GDO0\n"
+    ) % (ch_count, sample_rate)
+    if ch_count >= 2:
+        metadata += "probe2 = GDO2\n"
 
     with zipfile.ZipFile(filename, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("version", "2")
         zf.writestr("metadata", metadata)
-        zf.writestr("logic-1-%d.sr" % ch_count, bytes(packed))
-        if ch1:
-            zf.writestr("logic-1-2.sr", bytes(pack_bits(ch1)))
+        zf.writestr("logic-1-1", bytes(packed))
 
-    print(f"[+] Saved Sigrok: {filename} ({len(ch0)} samples, {ch_count}ch, {sample_rate} Hz)")
+    print(f"[+] Saved Sigrok: {filename} ({num_samples} samples, {ch_count}ch, {sample_rate} Hz)")
 
 
 def print_stats(ch0, ch1, sample_rate):
@@ -361,10 +363,10 @@ def print_stats(ch0, ch1, sample_rate):
 
 def main():
     parser = argparse.ArgumentParser(description="CC1101 SUMP 2-Channel Logic Analyzer Capture")
-    parser.add_argument("--port", "-p", default="COM6",
-                        help="Serial port (default: COM6 for USB mode, COM7 for UART mode)")
-    parser.add_argument("--baud", "-b", type=int, default=921600,
-                        help="Baud rate (default: 921600, must match firmware)")
+    parser.add_argument("--port", "-p", default="COM7",
+                        help="Serial port (default: COM7 for USB mode, COM6 for UART mode)")
+    parser.add_argument("--baud", "-b", type=int, default=115200,
+                        help="Baud rate (default: 115200, must match firmware)")
     parser.add_argument("--rate", "-r", type=int, default=24000,
                         help="Sample rate in Hz (default: 24000)")
     parser.add_argument("--samples", "-n", type=int, default=100000,
@@ -377,6 +379,8 @@ def main():
                         help="Output file (.vcd, .bin, .hex, .sr)")
     parser.add_argument("--format", "-f", choices=["vcd", "bin", "hex", "sr"],
                         default="sr", help="Output format (default: sr)")
+    parser.add_argument("--selftest", action="store_true",
+                        help="Trigger CC1101 self-test: TX 0x55 pattern while capturing GDO0")
     args = parser.parse_args()
 
     try:
@@ -398,6 +402,12 @@ def main():
         args.channels = meta["num_channels"]
 
     actual_samples = sump_configure(ser, args.rate, args.samples, args.clock)
+
+    if args.selftest:
+        print("[*] Sending self-test command (CC1101 TX 0x55 pattern)...")
+        ser.write(bytes([SUMP_CMD_SELFTEST, 0x55]))
+        time.sleep(1.0)
+
     raw = sump_capture(ser, actual_samples, args.channels)
 
     if args.channels >= 2:
