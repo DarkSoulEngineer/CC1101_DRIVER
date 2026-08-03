@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """Generate the 2FSK test signal used by the RFuzz end-to-end test case.
 
-Packet = 0xAA x4 (preamble) + 0xDE 0xAF (sync) + 0x01 0x02 0x03 0x04 (payload),
-bits MSB-first, 2FSK at +50 kHz / -50 kHz, phase-continuous, int8 I/Q interleaved.
+Packet = 0xAA x`preamble_bytes` (preamble) + 0xDE 0xAF (sync) + `payload`
+(a 4-byte default of 01 02 03 04), bits MSB-first, 2FSK at +50 kHz / -50 kHz,
+phase-continuous, int8 I/Q interleaved.
 
 Output matches what the CC1101 is configured to receive (433.92 MHz, 2400 bps,
-sync 0xDEAF 16/16, fixed 4-byte payload, no CRC, no whitening).
+sync 0xDEAF 16/16, fixed payload, no CRC, no whitening).  The payload and
+preamble length can be overridden (including a random payload via --random)
+so the host pipeline can be exercised against varied / random signals.
 
 Usage:
-    python gen_2fsk.py out.c8 [repeat] [gap_ms]
-    # repeat = number of packets (default 100)
-    # gap_ms = idle silence between packets (default 0 = continuous)
+    python gen_2fsk.py out.c8 [repeat] [gap_ms] [preamble_bytes] [payload_hex]
+    # repeat         = number of packets (default 100)
+    # gap_ms         = idle silence between packets (default 0 = continuous)
+    # preamble_bytes = preamble length in bytes (default 4)
+    # payload_hex    = payload bytes, e.g. 01020304 (default 01020304)
 
-Optional:
-    python gen_2fsk.py out.c8 1 0        # single shot (short preamble)
-    python gen_2fsk.py out.c8 1 0 64    # single shot with 64-byte preamble
-    python gen_2fsk.py out.c8 1 50 16   # single shot, 16-byte preamble, 50 ms gap
+Same thing as flags (preferred for new tests):
+    python gen_2fsk.py out.c8 --repeat 1 --gap-ms 0 --preamble 8
+    python gen_2fsk.py out.c8 --random 16 12345     # 16 random payload bytes
+    python gen_2fsk.py out.c8 --payload deadbeef     # fixed arbitrary payload
 
 The gap between packets is silent (carrier off, 0 amplitude).  Use a longer
 preamble (>= 8 bytes) for single-shot bursts: the CC1101 bit-synchronizer
@@ -23,6 +28,7 @@ needs a few bit cells to lock, so the demod glitches the first ~8 bits of an
 incoming burst.  A longer TX preamble absorbs that settling glitch and leaves
 the pre-sync window clean.
 """
+import argparse
 import sys
 
 import numpy as np
@@ -32,24 +38,31 @@ BPS = 2400.0
 DEV = 50000.0
 AMP = 90
 SPS = int(FS / BPS)
-PACKET = bytes([170]) * 4 + bytes([222, 175]) + bytes([1, 2, 3, 4])
+SYNC = bytes([222, 175])
+DEFAULT_PAYLOAD = bytes([1, 2, 3, 4])
+DEFAULT_PREAMBLE = 4
 
 
 def bits_msb(byte):
     return [(byte >> i) & 1 for i in range(7, -1, -1)]
 
 
-def packet_bits(preamble_bytes=4):
+def packet_bits(preamble_bytes=DEFAULT_PREAMBLE, payload=DEFAULT_PAYLOAD):
     bits = []
     pre = bytes([170]) * preamble_bytes
-    for b in pre + bytes([222, 175]) + bytes([1, 2, 3, 4]):
+    for b in pre + SYNC + payload:
         bits += bits_msb(b)
     return bits
 
 
+def _random_payload(length, seed):
+    rng = np.random.default_rng(seed)
+    return bytes(int(x) for x in rng.integers(0, 256, size=length, dtype=np.uint8))
+
+
 def generate(out_path, repeat=100, gap_ms=0.0, fs=FS, dev=DEV, amp=AMP,
-             preamble_bytes=4):
-    bits = packet_bits(preamble_bytes)
+              preamble_bytes=DEFAULT_PREAMBLE, payload=DEFAULT_PAYLOAD):
+    bits = packet_bits(preamble_bytes, payload)
     sps = int(fs / BPS)
     gap_samples = int(gap_ms * fs / 1000.0)
     total = len(bits) * repeat * sps + gap_samples * repeat
@@ -71,23 +84,64 @@ def generate(out_path, repeat=100, gap_ms=0.0, fs=FS, dev=DEV, amp=AMP,
     dur = total / fs
     print(f'wrote {out_path}: {iq8.shape[0]} samples, {dur:.2f} s, '
           f'{iq8.nbytes / 1000000.0:.1f} MB ({repeat} packets, '
-          f'gap {gap_ms} ms)', file=sys.stderr)
-    return iq8.shape[0]
-
-
-def main():
-    if len(sys.argv) < 2:
-        print('usage: gen_2fsk.py out.c8 [repeat] [gap_ms] [preamble_bytes]',
-              file=sys.stderr)
-        sys.exit(1)
-    out = sys.argv[1]
-    repeat = int(sys.argv[2]) if len(sys.argv) > 2 else 100
-    gap_ms = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
-    preamble_bytes = int(sys.argv[4]) if len(sys.argv) > 4 else 4
-    print(f'samples/symbol={SPS}, bits/packet={len(packet_bits(preamble_bytes))}',
+          f'preamble={preamble_bytes} payload={payload.hex()} gap {gap_ms} ms)',
           file=sys.stderr)
-    generate(out, repeat, gap_ms, preamble_bytes=preamble_bytes)
+    return iq8.shape[0], bits
+
+
+def _parse_args(argv):
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('out', help='output .c8 file (int8 IQ interleaved)')
+    ap.add_argument('--repeat', '-n', type=int, default=100,
+                    help='number of packets (default 100)')
+    ap.add_argument('--gap-ms', type=float, default=0.0,
+                    help='idle silence between packets in ms (default 0)')
+    ap.add_argument('--preamble', '-p', type=int, default=DEFAULT_PREAMBLE,
+                    help='preamble bytes (default 4; >=8 for single-shot bursts)')
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument('--payload', type=str, default=None,
+                   help='payload bytes as hex (default 01020304)')
+    g.add_argument('--random', type=int, nargs=2, default=None,
+                   metavar=('LEN', 'SEED'),
+                   help='generate LEN random payload bytes seeded by SEED')
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Backwards-compatible positional parsing: out [repeat] [gap_ms] [preamble]
+    # [payload_hex], so legacy `gen_2fsk.py out.c8 1 50 8` still works.
+    if len(argv) >= 2 and not argv[1].startswith('-'):
+        rest = [a for a in argv[1:] if not a.startswith('--')]
+        flags = [a for a in argv[1:] if a.startswith('--')]
+        if rest:
+            if len(rest) >= 2:
+                flags += ['--repeat', rest[0], '--gap-ms', rest[1]]
+            if len(rest) >= 3:
+                flags += ['--preamble', rest[2]]
+            if len(rest) >= 4:
+                flags += ['--payload', rest[3]]
+        argv = [argv[0]] + flags
+    args = _parse_args(argv)
+    if args.random is not None:
+        length, seed = args.random
+        payload = _random_payload(length, seed)
+    elif args.payload is not None:
+        try:
+            payload = bytes.fromhex(args.payload)
+        except ValueError:
+            sys.exit(f"invalid --payload hex: {args.payload!r}")
+    else:
+        payload = DEFAULT_PAYLOAD
+    if not payload:
+        sys.exit('payload must not be empty')
+    print(f'samples/symbol={SPS}, bits/packet={len(packet_bits(args.preamble, payload))}',
+          file=sys.stderr)
+    generate(args.out, args.repeat, args.gap_ms,
+             preamble_bytes=args.preamble, payload=payload)
 
 
 if __name__ == '__main__':
     main()
+
