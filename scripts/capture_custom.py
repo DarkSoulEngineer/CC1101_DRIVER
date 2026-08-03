@@ -350,8 +350,8 @@ def main():
     # offset is anchored on the GDO0 sync strobe (sample-accurate) rather than
     # the run-length-quantized bit offset.
     starts = rfuzz_tools.packet_starts(ch0n, spb, packets, args.preamble)
-    packets = rfuzz_tools.refine_packets(ch1n, spb, packets, starts,
-                                         args.preamble)
+    packets, gstarts = rfuzz_tools.refine_packets(ch1n, spb, packets, starts,
+                                                  args.preamble)
     fsk = np.zeros(len(ch1), dtype=np.float32)
     for p, start in zip(packets, starts):
         pbits = np.concatenate([
@@ -362,7 +362,7 @@ def main():
         fsk += mod_synth_from_bits(pbits, args.analog_amp, args.mod, if_dev,
                                    dev_hz, r_actual, len(ch1), spb, start)
 
-    ch1c = rfuzz_tools.clean_gdo2(packets, starts, r_actual / 2400.0,
+    ch1c = rfuzz_tools.clean_gdo2(packets, gstarts, r_actual / 2400.0,
                                   args.preamble, len(ch1))
 
     stats(ch0, ch1, r_actual, args.analog_amp, args.mod, if_dev, dev_hz)

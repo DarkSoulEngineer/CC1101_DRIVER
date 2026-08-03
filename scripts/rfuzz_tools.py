@@ -364,27 +364,52 @@ def clean_gdo2(packets, starts, spb, preamble_bytes, target_len):
 
 
 def refine_packets(ch1, spb, packets, starts, preamble_bytes):
-    """Re-decode each packet's bits with a majority vote per bit cell.
+    """Re-decode each packet's bits by majority vote over the received cells.
 
-    find_packets quantizes the run-length encoding of the noisy GDO2 stream,
-    which can mis-place bit boundaries by several bits.  A majority vote over
-    each raw bit cell, anchored on the GDO0 sync-strobe sample (accurate to
-    ~1 sample), is robust to sub-bit glitches and cell jitter and yields the
-    exact packet bits.  Updates each packet's payload and bit_errors in place.
+    find_packets locates the sync in the run-length-quantized stream, which
+    absorbs the bit-sync settling at burst start and the cell jitter.  The
+    sample-accurate bit grid is recovered from the raw GDO2 edges: each bit
+    cell spans [run-derived start, next run-derived start), re-synced at every
+    run boundary, so a uniform anchor-based grid (e.g. GDO0 rise minus the
+    nominal packet length) is NOT used - the demod compresses the early bits
+    and that grid lands ~0.5-1 bit off the real data.  Each cell is then
+    majority-voted so sub-bit glitches cannot flip it.
+
+    Returns (packets, grid_starts): packets get exact payloads; grid_starts
+    are the sample positions of each packet's first bit (used to place the
+    clean GDO2 channel in line with the raw demod edges, while the GDO0
+    `starts` remain the reference for the analog FSK render).
     """
     pre_len = preamble_bytes * 8
     sync_len = len(SYNC_BITS)
     nbits = pre_len + sync_len + 32
-    for p, start in zip(packets, starts):
-        bits = majority_bits(ch1, int(round(start)), nbits, spb)
-        payload_bits = bits[pre_len + sync_len:]
+    runs = rl_encode(remove_glitches(ch1, 10))
+    qbits, qstarts = runs_to_bits_pos(runs, spb)
+    grid_starts = []
+    for p in packets:
+        j0 = p["offset_bits"]
+        pbits = np.empty(nbits, dtype=np.uint8)
+        for k in range(nbits):
+            j = j0 + k
+            a = int(qstarts[j]) if 0 <= j < len(qstarts) else 0
+            b = int(qstarts[j + 1]) if 0 <= j + 1 < len(qstarts) else round(a + spb)
+            cell = ch1[a:b]
+            pbits[k] = 1 if cell.size and cell.sum() * 2 >= cell.size else 0
+        payload_bits = pbits[pre_len + sync_len:]
         payload = bytes(
             int("".join(str(b) for b in payload_bits[j:j + 8]), 2)
             for j in range(0, 32, 8)
         )
+        errors = int(np.count_nonzero(payload_bits != bits_msb(PAYLOAD_EXPECT)))
+        if (pbits[pre_len:pre_len + sync_len] != SYNC_BITS).any():
+            # Voted grid lost the sync (a glitch dropped a quantized bit and
+            # shifted the cell mapping); fall back to the find_packets decode.
+            payload = p["payload"]
+            errors = p["bit_errors"]
         p["payload"] = payload
-        p["bit_errors"] = int(np.count_nonzero(payload_bits != bits_msb(PAYLOAD_EXPECT)))
-    return packets
+        p["bit_errors"] = errors
+        grid_starts.append(int(qstarts[j0]) if 0 <= j0 < len(qstarts) else 0)
+    return packets, grid_starts
 
 
 def modulate(bits, dev, amp, sps=SPS):
@@ -430,7 +455,7 @@ def cmd_decode(args):
     bits = clean_bits(ch1, spb, args.glitch)
     packets = find_packets(bits, spb, args.preamble)
     starts = packet_starts(ch0, spb, packets, args.preamble)
-    packets = refine_packets(ch1, spb, packets, starts, args.preamble)
+    packets, _ = refine_packets(ch1, spb, packets, starts, args.preamble)
     print(f"rate_actual={rate:.1f} Hz spb={spb:.3f} bps={bps:.0f} "
           f"samples={len(ch1)} bits={len(bits)} packets={len(packets)}")
     for p in packets:
@@ -456,7 +481,7 @@ def cmd_regen(args):
     if not packets:
         sys.exit("error: no packets decoded, nothing to regenerate")
     starts = packet_starts(ch0, spb, packets, args.preamble)
-    packets = refine_packets(ch1, spb, packets, starts, args.preamble)
+    packets, _ = refine_packets(ch1, spb, packets, starts, args.preamble)
 
     pre_len = args.preamble * 8
     pkt_bits = pre_len + len(SYNC_BITS) + 32

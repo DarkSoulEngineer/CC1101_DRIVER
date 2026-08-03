@@ -194,9 +194,9 @@ def phase_capture(args, tx_file, base):
     # time-aligned with GDO2 (idle before/after the burst stays silent).
     starts = rfuzz_tools.packet_starts(np.asarray(ch0, dtype=np.uint8),
                                        spb, packets, args.preamble)
-    packets = rfuzz_tools.refine_packets(
+    packets, gstarts = rfuzz_tools.refine_packets(
         np.asarray(ch1, dtype=np.uint8), spb, packets, starts, args.preamble)
-    ch1c = rfuzz_tools.clean_gdo2(packets, starts, r_actual / 2400.0,
+    ch1c = rfuzz_tools.clean_gdo2(packets, gstarts, r_actual / 2400.0,
                                   args.preamble, len(ch1))
     fsk = np.zeros(len(ch1), dtype=np.float32)
     for p, start in zip(packets, starts):

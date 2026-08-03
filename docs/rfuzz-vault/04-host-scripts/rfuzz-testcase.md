@@ -8,7 +8,8 @@
 |-------|--------|
 | CC1101 packet engine decodes the 2FSK link bit-perfect | `[04 00] 01 02 03 04` frames on COM7, 0 bad |
 | Host GDO2 decoder agrees with the CC1101 packet engine | same packet count, `payload_ok 100%` |
-| Capture waveform is analyzable in PulseView | `.sr` has GDO0, GDO2, FSK (channel 3) |
+| Capture waveform is analyzable in PulseView | `.sr` has GDO0, GDO2, GDO2_CLEAN, FSK |
+| `GDO2_CLEAN` UART-decodes the packet at 2400 baud, MSB-first | `AA×preamble DE AF 01 02 03 04`, no glitches |
 | Signal can be regenerated for URH comparison | `.c8` (full I/Q) + `.c8` (I-only) |
 
 ## One-shot reproduction
@@ -28,7 +29,7 @@ Output (`--out-dir`, default `./`; `--name`, default `rfuzz_testcase`):
 ```
 rfuzz_2fsk_gap.c8           generated TX signal (12 MB @ 60 pkts)
 <name>.raw                  capture bytes (bit0=GDO0, bit1=GDO2)
-<name>.sr                   PulseView: GDO0 + GDO2 (logic), FSK (analog)
+<name>.sr                   PulseView: GDO0 + GDO2 + GDO2_CLEAN (logic), FSK (analog)
 <name>.vcd                  same, VCD format (FSK as real channel)
 <name>_regen.c8             regenerated 2FSK I/Q (URH)
 <name>_regen_i.c8           regenerated I-only (Q=0)
@@ -70,15 +71,29 @@ python rfuzz_tools.py regen --raw cap.raw --rate 250000 --out cap_regen.c8
 
 ## Channel 3: FSK analog in PulseView
 
-`capture_custom.py` writes a Sigrok session v2 `.sr` with **three channels**
+`capture_custom.py` writes a Sigrok session v2 `.sr` with **four channels**
 in one device section (matching libsigrok's own `srzip` writer, with
-continuous channel indices `probe1`, `probe2`, `analog3`):
+continuous channel indices `probe1`, `probe2`, `probe3`, `analog4`):
 
 | Ch | Probe | Type | Meaning |
 |----|-------|------|---------|
 | 1 | `GDO0` | logic | sync-word / TX-active pulse |
-| 2 | `GDO2` | logic | async demodulated data bits |
-| 3 | `FSK`  | analog | synthesized modulation **sinusoid** (`--mod`) |
+| 2 | `GDO2` | logic | async demodulated data bits (raw, noisy) |
+| 3 | `GDO2_CLEAN` | logic | glitch-free, UART-framed reconstruction |
+| 4 | `FSK`  | analog | synthesized modulation **sinusoid** (`--mod`) |
+
+**`GDO2_CLEAN`** is the recommended channel for UART decoding. The raw `GDO2`
+is the CC1101 async-serial demodulator output: sub-bit glitches, bit-sync
+settling at the start of each burst and a free-running noise tail between
+bursts (no carrier → the demod toggles freely) make a 2400-baud async-UART
+decode error throughout the packet. Worse, the `0xAA` preamble is
+**phase-ambiguous** to an async UART decoder — it locks an even number of bits
+off the true byte boundary and then misreads the sync/payload. `GDO2_CLEAN`
+rebuilds the intended byte stream (preamble + sync + decoded payload) as
+proper async UART frames (start bit, 8 MSB-first data bits, stop bit) at
+exactly 2400 baud with the line idle high between packets, so a stock
+2400-baud MSB-first UART decoder reads `AA…AA DE AF 01 02 03 04` with zero
+errors. See `rfuzz_tools.clean_gdo2` / `uart_encode_bytes`.
 
 The CC1101 has no analog output, so the analog channel is synthesized
 host-side from the **clean decoded packet bits** (preamble + sync + payload),
@@ -148,6 +163,29 @@ The capture window opens first, then TX starts 150 ms later — HackRF startup
   for the `manual` subcommand.
 - **Ports**: COM7 = USB Serial/JTAG (capture + packet stream), COM6 = UART0
   console (ESP-IDF logs).
+
+## Hardcoded test parameters (preamble / sync / payload)
+
+This test setup **hardcodes the link parameters in both the firmware and the
+scripts** for the single bench configuration (2FSK, 2400 bps, sync `0xDEAF`,
+4-byte payload). This is intentional for reproducible validation, but it is a
+**test-only shortcut** — the code will silently mis-decode if any of these are
+changed without updating all of them:
+
+| Parameter | Firmware | Scripts |
+|-----------|----------|---------|
+| Sync word `0xDEAF` | `main/main.c` → `rx_cfg.packet.sync1/sync0` | `rfuzz_tools.SYNC_BITS`/`SYNC_BYTES` (duplicated in `capture_custom.SYNC_BITS`) |
+| Preamble length (default 4) | `main/main.c` → `rx_cfg.modem.preamble_bytes` | `rfuzz_tools.DEFAULT_PREAMBLE_BYTES` + `--preamble` on the test scripts |
+| Payload `01 02 03 04` | `main/main.c` → `max_length`/fixed 4-byte | `rfuzz_tools.PAYLOAD_EXPECT`, `rfuzz_testcase.EXPECT_PAYLOAD` |
+| Data rate 2400 bps | `rx_cfg.modem.datarate_bps` | `2400.0` literals (`--spb`/`--baud` in `rfuzz_tools`) |
+
+For a general/parameterized use case these should become CLI arguments /
+Kconfig options and the constants derived from them (e.g. `SYNC_BITS` built
+from a `sync1/sync0` pair, `preamble_bits()` from a length argument) rather
+than module-level literals. Note that `rfuzz_tools.clean_gdo2` builds the
+clean channel from the **decoded** payload, so it needs the same sync-word
+assumption to reconstruct the frame; the sync-majority check in
+`refine_packets` likewise validates against `SYNC_BITS`.
 
 ## Manual bit-by-bit decode
 
