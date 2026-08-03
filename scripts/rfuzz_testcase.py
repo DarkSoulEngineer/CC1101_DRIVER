@@ -191,15 +191,21 @@ def phase_capture(args, tx_file, base):
     # Synthesize FSK from CLEAN packet bits: render each decoded packet as the
     # FULL preamble + sync + payload at its actual sample offset, so the analog
     # channel duration matches the real burst (~preamble bits / 2400) and stays
-    # time-aligned with GDO2 (idle before/after the burst stays silent).
+    # time-aligned with GDO2 (idle before/after the burst stays silent).  The
+    # FSK and clean GDO2 channels share the run-derived start (the true
+    # first-bit edge); the GDO0-anchored start is ~1 bit early because the
+    # modem bit-sync compresses the leading bits.
     starts = rfuzz_tools.packet_starts(np.asarray(ch0, dtype=np.uint8),
                                        spb, packets, args.preamble)
     packets, gstarts = rfuzz_tools.refine_packets(
         np.asarray(ch1, dtype=np.uint8), spb, packets, starts, args.preamble)
-    ch1c = rfuzz_tools.clean_gdo2(packets, gstarts, r_actual / 2400.0,
-                                  args.preamble, len(ch1))
+    ch1cr = rfuzz_tools.clean_gdo2(packets, gstarts, spb,
+                                   args.preamble, len(ch1), framed=True,
+                                   corrected=True)
+    ch1c = rfuzz_tools.clean_gdo2(packets, gstarts, spb,
+                                  args.preamble, len(ch1), framed=True)
     fsk = np.zeros(len(ch1), dtype=np.float32)
-    for p, start in zip(packets, starts):
+    for p, start in zip(packets, gstarts):
         pbits = np.concatenate([
             rfuzz_tools.preamble_bits(args.preamble),
             rfuzz_tools.SYNC_BITS,
@@ -212,9 +218,9 @@ def phase_capture(args, tx_file, base):
                          if_dev, dev_hz)
     with open(base + ".raw", "wb") as f:
         f.write(bytes(raw))
-    capture_custom.save_sr(ch0, ch1, ch1c, fsk, int(round(r_actual)),
+    capture_custom.save_sr(ch0, ch1, ch1cr, ch1c, fsk, int(round(r_actual)),
                            base + ".sr")
-    capture_custom.save_vcd(ch0, ch1, ch1c, fsk, r_actual, base + ".vcd")
+    capture_custom.save_vcd(ch0, ch1, ch1cr, ch1c, fsk, r_actual, base + ".vcd")
     return base + ".raw"
 
 

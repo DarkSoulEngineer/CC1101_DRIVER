@@ -8,8 +8,10 @@
 |-------|--------|
 | CC1101 packet engine decodes the 2FSK link bit-perfect | `[04 00] 01 02 03 04` frames on COM7, 0 bad |
 | Host GDO2 decoder agrees with the CC1101 packet engine | same packet count, `payload_ok 100%` |
-| Capture waveform is analyzable in PulseView | `.sr` has GDO0, GDO2, GDO2_CLEAN, FSK |
-| `GDO2_CLEAN` UART-decodes the packet at 2400 baud, MSB-first | `AA×preamble DE AF 01 02 03 04`, no glitches |
+| Capture waveform is analyzable in PulseView | `.sr` has GDO0, GDO2, GDO2_CLEAN_RAW, GDO2_CLEAN, FSK |
+| `GDO2_CLEAN_RAW` and `GDO2_CLEAN` both UART-decode at 2400 baud, MSB-first | `AA×preamble DE AF 01 02 03 04`, no glitches |
+| `GDO2_CLEAN_RAW` is the error-corrected received bits (ideal 0xAA preamble) | probe3 decodes like probe4; raw GDO2 kept as-is (honest NRZ) |
+| `GDO2_CLEAN` burst starts at the same sample as FSK | run-derived first-bit edge (both anchored on `gstarts`) |
 | Signal can be regenerated for URH comparison | `.c8` (full I/Q) + `.c8` (I-only) |
 
 ## One-shot reproduction
@@ -29,7 +31,7 @@ Output (`--out-dir`, default `./`; `--name`, default `rfuzz_testcase`):
 ```
 rfuzz_2fsk_gap.c8           generated TX signal (12 MB @ 60 pkts)
 <name>.raw                  capture bytes (bit0=GDO0, bit1=GDO2)
-<name>.sr                   PulseView: GDO0 + GDO2 + GDO2_CLEAN (logic), FSK (analog)
+<name>.sr                   PulseView: GDO0 + GDO2 + GDO2_CLEAN_RAW + GDO2_CLEAN (logic), FSK (analog)
 <name>.vcd                  same, VCD format (FSK as real channel)
 <name>_regen.c8             regenerated 2FSK I/Q (URH)
 <name>_regen_i.c8           regenerated I-only (Q=0)
@@ -69,31 +71,73 @@ python rfuzz_tools.py decode --raw cap.raw --rate 250000
 python rfuzz_tools.py regen --raw cap.raw --rate 250000 --out cap_regen.c8
 ```
 
-## Channel 3: FSK analog in PulseView
+## Channels in PulseView
 
-`capture_custom.py` writes a Sigrok session v2 `.sr` with **four channels**
+`capture_custom.py` writes a Sigrok session v2 `.sr` with **five channels**
 in one device section (matching libsigrok's own `srzip` writer, with
-continuous channel indices `probe1`, `probe2`, `probe3`, `analog4`):
+continuous channel indices `probe1..probe4`, `analog5`). Every channel spans
+the **full capture window** — the same total length — so they stack and
+compare 1:1:
 
 | Ch | Probe | Type | Meaning |
 |----|-------|------|---------|
-| 1 | `GDO0` | logic | sync-word / TX-active pulse |
-| 2 | `GDO2` | logic | async demodulated data bits (raw, noisy) |
-| 3 | `GDO2_CLEAN` | logic | glitch-free, UART-framed reconstruction |
-| 4 | `FSK`  | analog | synthesized modulation **sinusoid** (`--mod`) |
+| 1 | `GDO0` | logic | sync-word / TX-active pulse (raw) |
+| 2 | `GDO2` | logic | async demodulated data bits (**raw, noisy**) |
+| 3 | `GDO2_CLEAN_RAW` | logic | **error-corrected UART frame** (2400 baud, MSB-first) |
+| 4 | `GDO2_CLEAN` | logic | **UART-framed** reconstruction (2400 baud, MSB-first) |
+| 5 | `FSK`  | analog | synthesized modulation **sinusoid** (`--mod`) |
 
-**`GDO2_CLEAN`** is the recommended channel for UART decoding. The raw `GDO2`
-is the CC1101 async-serial demodulator output: sub-bit glitches, bit-sync
-settling at the start of each burst and a free-running noise tail between
-bursts (no carrier → the demod toggles freely) make a 2400-baud async-UART
-decode error throughout the packet. Worse, the `0xAA` preamble is
-**phase-ambiguous** to an async UART decoder — it locks an even number of bits
-off the true byte boundary and then misreads the sync/payload. `GDO2_CLEAN`
-rebuilds the intended byte stream (preamble + sync + decoded payload) as
-proper async UART frames (start bit, 8 MSB-first data bits, stop bit) at
-exactly 2400 baud with the line idle high between packets, so a stock
-2400-baud MSB-first UART decoder reads `AA…AA DE AF 01 02 03 04` with zero
-errors. See `rfuzz_tools.clean_gdo2` / `uart_encode_bytes`.
+**`GDO2_CLEAN_RAW`** is the *corrected-received view* of `GDO2`: each decoded
+packet's sync and payload bytes are taken from the **error-corrected received
+bits** (`refine_packets` → `p["pbits"]`, the majority vote of the actual demod
+sample cells) and re-framed as async UART (start bit, 8 MSB-first data bits,
+stop bit) at 2400 baud with the line idle high, prefixed by the **ideal 0xAA
+preamble**. So a stock 2400-baud MSB-first UART decoder reads
+`AA…AA DE AF 01 02 03 04` from **both** probe3 and probe4, while probe3 still
+reflects the received bits (only the preamble is idealized — the modem
+bit-sync settles over the leading bits, so the received preamble cannot be
+decoded faithfully). Built by `rfuzz_tools.clean_gdo2(..., framed=True,
+corrected=True)`.
+
+The four sample-domain error corrections (`rfuzz_tools.clean_raw_gdo2`) that
+this is built on are still available as a diagnostic in the `clean` subcommand
+(the same-length **NRZ** corrected signal, same idle level):
+
+1. **Glitch filter** — every run shorter than 10 samples is merged into its
+   neighbours (digital debounce);
+2. **Edge resync** — run-length encoding of the filtered stream yields a
+   per-bit grid re-synced at every real demod edge, so cell boundaries follow
+   the actual signal instead of a fixed grid (the modem bit-sync compresses
+   the leading bits, so a uniform grid is ~0.5–1 bit off);
+3. **Majority vote** — each cell is re-voted over the **original** samples, so
+   a glitch that only pollutes part of a cell is corrected to the true bit;
+4. **Noise gating** — only the GDO0-anchored packet windows are emitted; the
+   free-running demodulator tail between bursts (no carrier → GDO2 toggles
+   freely) is replaced with the line's own idle level (sample 0).
+
+On the diag capture the NRZ-corrected channel removes ~97% of the transitions
+(1900 → 54) while the payload still decodes exactly (`01 02 03 04`, 0 bit
+errors). Run it standalone with
+`python rfuzz_tools.py clean --raw cap.raw --rate 250000`, which also writes
+`<base>_clean.raw` and reports before/after packet quality.
+
+**`GDO2_CLEAN`** is the *ideal decoder view*: the intended byte stream
+(preamble + sync + decoded payload) re-framed as async UART at 2400 baud with
+the line idle high (`clean_gdo2(..., framed=True)`). Both clean channels'
+falling start-bit edge marks the burst start unambiguously and their bursts
+are 25% longer than the radio signal (inherent to the framing). The raw
+`GDO2` is deliberately left as-is so both reconstructions can be compared
+against the source.
+
+**Alignment**: `GDO2_CLEAN` and the FSK render are anchored on the same
+run-derived burst start (`gstarts`, the true first-bit edge) — not the GDO0
+sync strobe, which lands ~1 bit early because the modem bit-sync compresses
+the leading bits. The clean/analog channels are built from the **decoded
+packet data** (`refine_packets`: majority-vote of the actual GDO2 sample
+cells for the payload, run-derived edge timing); the ideal `GDO2_CLEAN`
+takes the preamble `0xAA` and sync `0xDEAF` from the known TX configuration,
+while `GDO2_CLEAN_RAW` uses the corrected received sync/payload and only the
+preamble is idealized. See `rfuzz_tools.clean_gdo2` / `clean_raw_gdo2`.
 
 The CC1101 has no analog output, so the analog channel is synthesized
 host-side from the **clean decoded packet bits** (preamble + sync + payload),
@@ -115,9 +159,11 @@ on/off). Amplitude via `--analog-amp` (default 90).
 > changes, only the phase reverses at bit boundaries. Two distinct positive
 > tones make the frequency jump visible.
 
-Open `rfuzz_testcase.sr` in PulseView: all three channels are enabled —
-`GDO0` (sync pulses, sparse), `GDO2` (data bits), `FSK` (analog). The `.vcd`
-carries the same FSK channel as a real-valued signal for GTKWave.
+Open `rfuzz_testcase.sr` in PulseView: all five channels are enabled —
+`GDO0` (sync pulses, sparse), `GDO2` (noisy data bits), `GDO2_CLEAN_RAW`
+(UART-framed corrected bits, decodes at 2400 baud), `GDO2_CLEAN` (UART-framed
+ideal, decodes at 2400 baud), `FSK` (analog). The `.vcd` carries the same FSK
+channel as a real-valued signal for GTKWave.
 
 ## Single-shot mode
 
@@ -157,10 +203,12 @@ The capture window opens first, then TX starts 150 ms later — HackRF startup
 - **`pre=N` in decode output**: the CC1101 async-data output (GDO2) includes a
   few settling bits before the preamble and the preamble may not align to the
   32-bit window; sync and payload always decode exactly regardless.
-- **FSK channel 3**: synthesized from the **clean decoded packet bits**
+- **FSK analog**: synthesized from the **clean decoded packet bits**
   (preamble + sync + payload), not raw GDO2, so it shows a proper phase-continuous
-  2FSK with constant amplitude per bit cell; see [[04-host-scripts/rfuzz-tools|rfuzz_tools.py]]
-  for the `manual` subcommand.
+  2FSK with constant amplitude per bit cell; it shares its burst **start**
+  with `GDO2_CLEAN` (both run-derived); see
+  [[04-host-scripts/rfuzz-tools|rfuzz_tools.py]] for the `manual` and `clean`
+  subcommands.
 - **Ports**: COM7 = USB Serial/JTAG (capture + packet stream), COM6 = UART0
   console (ESP-IDF logs).
 
@@ -186,6 +234,24 @@ than module-level literals. Note that `rfuzz_tools.clean_gdo2` builds the
 clean channel from the **decoded** payload, so it needs the same sync-word
 assumption to reconstruct the frame; the sync-majority check in
 `refine_packets` likewise validates against `SYNC_BITS`.
+
+### Detected vs hardcoded — real-life recommendation
+
+| Parameter | Bench (this setup) | Real-life (unknown link) |
+|-----------|--------------------|--------------------------|
+| Data rate / bit timing | hardcoded 2400 + `detect_datarate_iter` refines it | **always detect** (edge-timing / auto-baud; already implemented) |
+| Sync word `0xDEAF` | known from TX config (search key for `find_packets`) | **detect**: preamble is a run of alternating bits; the first *non-alternating* pair marks the sync start, then read 16 bits. Falls back to a config/database of known syncs |
+| Preamble length | `--preamble` (TX known) | **detect**: number of alternating bits before the sync start (see above) |
+| Payload | decoded from the stream (never hardcoded) | always decoded |
+| Modulation / deviation | `--mod 2fsk`, `--fsk-dev 50000` | auto (2FSK/2PSK/ASK classifier, spectral deviation estimate) |
+
+Rule of thumb: **decode order — never hardcode anything the stream itself can
+reveal.** Preamble, sync and payload are all *in the data*; the only genuine
+unknowns are the modulation (classifiable from the analog band) and the rate
+(measured from edge timing). Hardcoding is only a fast path for a known bench
+link. The current scripts already detect the datarate; the next step for a
+real-life variant is a `--detect-sync` mode that finds the preamble/sync from
+the alternation-break instead of `SYNC_BITS`.
 
 ## Manual bit-by-bit decode
 

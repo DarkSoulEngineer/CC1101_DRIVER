@@ -11,11 +11,16 @@ After a capture command the firmware streams `count` raw bytes:
 
 Outputs:
   .raw  raw capture bytes (bit0=GDO0, bit1=GDO2)
-  .sr   Sigrok session with 3 channels for PulseView:
-          probe1 GDO0  (logic, sync / TX active)
-          probe2 GDO2  (logic, async demodulated data)
-          analog3 FSK  (analog, synthesized modulation sinusoid)
-  .vcd  VCD with GDO0, GDO2 and a real-valued FSK channel
+  .sr   Sigrok session with 4 logic probes + 1 analog for PulseView:
+          probe1 GDO0          (logic, sync / TX active)
+          probe2 GDO2          (logic, raw async demodulated data)
+          probe3 GDO2_CLEAN_RAW (logic, error-corrected UART frame of the
+                                 received sync+payload bits with ideal 0xAA
+                                 preamble -> decodes at 2400 baud)
+          probe4 GDO2_CLEAN    (logic, ideal UART frame of the decoded packet)
+          analog5 FSK          (analog, synthesized modulation sinusoid)
+  .vcd  VCD with GDO0, GDO2, GDO2_CLEAN_RAW, GDO2_CLEAN and a real-valued
+        FSK channel
 
 Channel 3 (FSK): the CC1101 only exposes digital GDO0/GDO2, so the analog
 trace is a sinusoid synthesized from the glitch-cleaned GDO2 bits; the
@@ -239,7 +244,7 @@ def mod_synth_from_bits(bits, amp, mod, if_hz, dev_hz, rate_actual, target_len,
     return fsk
 
 
-def save_vcd(ch0, ch1, ch1c, fsk, rate, fn):
+def save_vcd(ch0, ch1, ch1cr, ch1c, fsk, rate, fn):
     tps = 1000000000.0 / rate
     with open(fn, 'w', newline='\n') as f:
         f.write('$timescale 1ns $end\n')
@@ -247,30 +252,35 @@ def save_vcd(ch0, ch1, ch1c, fsk, rate, fn):
         f.write('$scope module CC1101 $end\n')
         f.write('$var wire 1 ! GDO0 $end\n')
         f.write('$var wire 1 @ GDO2 $end\n')
-        f.write('$var wire 1 # GDO2_CLEAN $end\n')
+        f.write('$var wire 1 # GDO2_CLEAN_RAW $end\n')
+        f.write('$var wire 1 $ GDO2_CLEAN $end\n')
         f.write('$var real 1 % FSK $end\n')
         f.write('$upscope $end\n$enddefinitions $end\n')
-        f.write('$dumpvars\nx!\nx@\nx#\n0.0%\n$end\n')
+        f.write('$dumpvars\nx!\nx@\nx#\nx$\n0.0%\n$end\n')
         p0 = None
         p1 = None
+        pr = None
         pc = None
         pf = None
         for i in range(len(ch0)):
-            if ch0[i] != p0 or ch1[i] != p1 or ch1c[i] != pc or fsk[i] != pf:
+            if (ch0[i] != p0 or ch1[i] != p1 or ch1cr[i] != pr
+                    or ch1c[i] != pc or fsk[i] != pf):
                 f.write('#%d\n' % int(i * tps))
                 if ch0[i] != p0:
                     f.write(f'{ch0[i]}!\n')
                 if ch1[i] != p1:
                     f.write(f'{ch1[i]}@\n')
+                if ch1cr[i] != pr:
+                    f.write(f'{ch1cr[i]}#\n')
                 if ch1c[i] != pc:
-                    f.write(f'{ch1c[i]}#\n')
+                    f.write(f'{ch1c[i]}$\n')
                 if fsk[i] != pf:
                     f.write(f'{fsk[i]:.2f}%\n')
-                pf, pc, p1, p0 = fsk[i], ch1c[i], ch1[i], ch0[i]
+                pf, pc, pr, p1, p0 = fsk[i], ch1c[i], ch1cr[i], ch1[i], ch0[i]
     print(f'[+] {fn}')
 
 
-def save_sr(ch0, ch1, ch1c, fsk, rate, fn):
+def save_sr(ch0, ch1, ch1cr, ch1c, fsk, rate, fn):
     packed = bytearray(len(ch0))
     for i in range(len(ch0)):
         b = 0
@@ -278,20 +288,22 @@ def save_sr(ch0, ch1, ch1c, fsk, rate, fn):
             b |= 1
         if ch1[i]:
             b |= 2
-        if ch1c[i]:
+        if ch1cr[i]:
             b |= 4
+        if ch1c[i]:
+            b |= 8
         packed[i] = b
     meta = ('[global]\nsigrok version = 2\n\n'
             '[device 1]\ncapturefile = logic-1\nunitsize = 1\n'
-            'total probes = 3\nsamplerate = %d\ntotal analog = 1\n'
-            'probe1 = GDO0\nprobe2 = GDO2\nprobe3 = GDO2_CLEAN\n'
-            'analog4 = FSK\n' % rate)
+            'total probes = 4\nsamplerate = %d\ntotal analog = 1\n'
+            'probe1 = GDO0\nprobe2 = GDO2\nprobe3 = GDO2_CLEAN_RAW\n'
+            'probe4 = GDO2_CLEAN\nanalog5 = FSK\n' % rate)
     with zipfile.ZipFile(fn, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr('version', '2')
         zf.writestr('metadata', meta)
         zf.writestr('logic-1-1', bytes(packed))
-        zf.writestr('analog-1-4', fsk.astype('<f4').tobytes())
-    print(f'[+] {fn} (GDO0, GDO2, GDO2_CLEAN logic | FSK analog)')
+        zf.writestr('analog-1-5', fsk.astype('<f4').tobytes())
+    print(f'[+] {fn} (GDO0, GDO2, GDO2_CLEAN_RAW[UART], GDO2_CLEAN[UART] logic | FSK analog)')
 
 
 def main():
@@ -346,14 +358,16 @@ def main():
 
     # Render each decoded packet as the full preamble + sync + payload at its
     # actual sample offset so the analog channel matches the real burst and
-    # stays time-aligned with GDO2 (idle before/after stays silent).  The
-    # offset is anchored on the GDO0 sync strobe (sample-accurate) rather than
-    # the run-length-quantized bit offset.
+    # stays time-aligned with GDO2 (idle before/after stays silent).  Both the
+    # FSK and the clean GDO2 channel are anchored on the same run-derived
+    # start (the true first-bit edge): the GDO0 sync-strobe start is ~1 bit
+    # early because the modem bit-sync compresses the leading bits, which
+    # would misalign the analog render against the real data.
     starts = rfuzz_tools.packet_starts(ch0n, spb, packets, args.preamble)
     packets, gstarts = rfuzz_tools.refine_packets(ch1n, spb, packets, starts,
                                                   args.preamble)
     fsk = np.zeros(len(ch1), dtype=np.float32)
-    for p, start in zip(packets, starts):
+    for p, start in zip(packets, gstarts):
         pbits = np.concatenate([
             rfuzz_tools.preamble_bits(args.preamble),
             SYNC_BITS,
@@ -362,8 +376,11 @@ def main():
         fsk += mod_synth_from_bits(pbits, args.analog_amp, args.mod, if_dev,
                                    dev_hz, r_actual, len(ch1), spb, start)
 
-    ch1c = rfuzz_tools.clean_gdo2(packets, gstarts, r_actual / 2400.0,
-                                  args.preamble, len(ch1))
+    ch1cr = rfuzz_tools.clean_gdo2(packets, gstarts, spb,
+                                   args.preamble, len(ch1), framed=True,
+                                   corrected=True)
+    ch1c = rfuzz_tools.clean_gdo2(packets, gstarts, spb,
+                                  args.preamble, len(ch1), framed=True)
 
     stats(ch0, ch1, r_actual, args.analog_amp, args.mod, if_dev, dev_hz)
 
@@ -371,8 +388,8 @@ def main():
     base = args.out if args.out else f'capture_{ts}'
     with open(base + '.raw', 'wb') as f:
         f.write(raw)
-    save_sr(ch0, ch1, ch1c, fsk, int(round(r_actual)), base + '.sr')
-    save_vcd(ch0, ch1, ch1c, fsk, r_actual, base + '.vcd')
+    save_sr(ch0, ch1, ch1cr, ch1c, fsk, int(round(r_actual)), base + '.sr')
+    save_vcd(ch0, ch1, ch1cr, ch1c, fsk, r_actual, base + '.vcd')
 
 
 if __name__ == '__main__':

@@ -70,6 +70,14 @@ def bits_msb(data):
     return np.array(out, dtype=np.uint8)
 
 
+def bytes_from_bits(bits):
+    """Group a bit array into bytes, MSB-first (8 bits per byte)."""
+    return bytes(
+        int("".join(str(b) for b in bits[j:j + 8]), 2)
+        for j in range(0, len(bits) - 7, 8)
+    )
+
+
 def actual_rate(requested):
     alarm = 1000000 // requested
     return 1000000.0 / alarm
@@ -167,6 +175,63 @@ def majority_bits(ch2, s0, nbits, spb):
 def clean_bits(ch2, spb, min_run):
     ch2 = remove_glitches(ch2, min_run)
     return runs_to_bits(rl_encode(ch2), spb)
+
+
+def clean_raw_gdo2(ch1, spb, windows, glitch=10, idle=None):
+    """Error-corrected raw GDO2, same length as the input (no re-encode).
+
+    Four sample-domain corrections are applied in order:
+      1. glitch filter - remove_glitches() drops sub-bit pulses (a digital
+         debounce: any run shorter than `glitch` samples is merged into its
+         neighbours);
+      2. edge resync   - run-length encoding of the filtered stream yields a
+         per-bit grid that is re-synced at every real demod edge
+         (runs_to_bits_pos), so cell boundaries track the actual signal
+         instead of a fixed uniform grid (the modem bit-sync compresses the
+         leading bits, so a uniform grid is ~0.5-1 bit off);
+      3. majority vote - every cell is re-voted over the ORIGINAL samples, so
+         a glitch that only pollutes part of a cell is corrected to the true
+         bit value (sub-bit errors cannot flip a cell);
+      4. noise gating  - only the packet windows (from detect_datarate_iter)
+         are emitted; the free-running demodulator tail between bursts (no
+         carrier -> GDO2 toggles freely) is replaced with `idle` (defaults to
+         the level the line holds at sample 0, so the cleaned channel idles
+         exactly like the raw one).
+
+    The result is a clean square wave whose edges sit on the real received
+    edges and whose bit values are glitch-corrected - the DSP-front-end view
+    of GDO2, bit-for-bit decodable (NRZ) inside each packet window.  Unlike
+    GDO2_CLEAN (UART), it preserves the actual received preamble bits (the
+    modem bit-sync settling) instead of substituting the ideal 0xAA.
+
+    The .sr/.vcd probe3 GDO2_CLEAN_RAW is built on top of these corrected
+    bits via clean_gdo2(..., framed=True, corrected=True) so it decodes at
+    2400 baud; this NRZ form is the diagnostic used by the `clean`
+    subcommand (writes <base>_clean.raw).
+    """
+    n = len(ch1)
+    if idle is None:
+        idle = int(ch1[0]) if len(ch1) else 1
+    out = np.full(n, idle, dtype=np.uint8)
+    g = remove_glitches(ch1, glitch)
+    _qbits, qstarts = runs_to_bits_pos(rl_encode(g), spb)
+    for s, e in windows:
+        s = max(0, s)
+        e = min(e, n)
+        if e <= s:
+            continue
+        j = max(int(np.searchsorted(qstarts, s)) - 1, 0)
+        while j < len(qstarts):
+            a = max(int(qstarts[j]), s)
+            if a >= e:
+                break
+            b = int(qstarts[j + 1]) if j + 1 < len(qstarts) else n
+            b = min(b, e)
+            if b > a:
+                cell = ch1[a:b]
+                out[a:b] = 1 if cell.sum() * 2 >= cell.size else 0
+            j += 1
+    return out
 
 
 def packet_windows(ch0, spb, preamble_bytes=DEFAULT_PREAMBLE_BYTES,
@@ -332,34 +397,78 @@ def uart_encode_bytes(data):
     return np.asarray(bits, dtype=np.uint8)
 
 
-def clean_gdo2(packets, starts, spb, preamble_bytes, target_len):
-    """UART-encoded, noise-gated reconstruction of GDO2.
+def clean_gdo2(packets, starts, spb, preamble_bytes, target_len, framed=False,
+               corrected=False):
+    """Noise-gated reconstruction of GDO2 from the decoded packet data.
 
     GDO2 is the raw async-serial demodulator output: it carries sub-bit
     glitches, bit-sync settling artifacts at the start of a burst and a noise
     tail between bursts (no carrier -> the demodulator toggles freely).  This
-    rebuilds the byte stream the radio intended - preamble, sync and payload -
-    as proper async UART frames (start/stop bits, MSB-first) placed at the
-    GDO0-anchored packet offset, with the line idle (high) everywhere else.
+    rebuilds the byte stream the radio intended from the decoded packets
+    (`refine_packets`) and places it at the actual received-cell start
+    (`starts`), with the line idle (high) everywhere else.
 
-    The 0xAA preamble of a raw NRZ stream is phase-ambiguous to an async UART
+    Two modes:
+    - framed=True: async UART frames (start bit, 8 data bits MSB-first, stop
+      bit) of the preamble + sync + payload bytes, so a stock 2400-baud UART
+      decoder reads the exact packet bytes.  This is the recommended / emitted
+      channel (`GDO2_CLEAN`): the falling start-bit edge marks the burst start
+      unambiguously and the 0xAA preamble (which is phase-ambiguous to an
+      async UART decoder when raw) decodes exactly.  Its burst is 25% longer
+      than the radio signal - inherent to the start/stop framing.  With
+      `corrected=True` the sync and payload bytes are taken from the
+      error-corrected received bits (`p["pbits"]` from refine_packets, i.e.
+      the majority-vote of the actual demod cells) instead of the ideal
+      SYNC_BYTES/decoded payload; the preamble stays the ideal 0xAA because
+      the modem bit-sync settles over the leading bits and they cannot be
+      decoded faithfully.  That is the `GDO2_CLEAN_RAW` channel: UART-framed,
+      still anchored on the received bits, decoding to the same packet.
+    - framed=False: clean NRZ of the exact radio bits (preamble + sync +
+      payload), one `int(spb)` sample per bit - the same bit count and width
+      as the FSK render.  Kept only as a code option (it is redundant with
+      the FSK analog channel and has no visible start marker, since the first
+      preamble bit is high like the idle line); not emitted to the .sr/.vcd.
+
+    Provenance: the payload bytes are the majority-vote decode of the actual
+    GDO2 sample cells (refine_packets); the bit timing is the run-derived
+    edge start.  The preamble (0xAA x preamble_bytes) and sync word
+    (SYNC_BYTES) are taken from the known TX configuration - they cannot be
+    decoded from the raw stream because the modem bit-sync settles over the
+    leading bits and the 0xAA preamble is phase-ambiguous to an async UART
     decoder (it locks an even number of bits off the true byte boundary and
-    then misreads the payload); framing every byte with explicit start/stop
-    bits removes that ambiguity, so decoding at 2400 bps, MSB-first, reads the
-    exact packet bytes (0xAA x preamble, 0xDEAF, payload) with no errors.
+    then misreads the payload).
     """
+    m = int(spb)
     out = np.full(target_len, 1, dtype=np.uint8)
     for p, start in zip(packets, starts):
-        data = bytes([0xAA]) * preamble_bytes + SYNC_BYTES + bytes(p["payload"])
-        seg = np.full(target_len, 1, dtype=np.uint8)
-        if start >= 0:
-            for k, b in enumerate(uart_encode_bytes(data)):
-                a = round(start + k * spb)
-                c = round(start + (k + 1) * spb)
-                if a >= target_len:
-                    break
-                seg[a:min(c, target_len)] = b
-        out[seg == 0] = 0
+        payload = bytes(p["payload"])
+        if framed:
+            if corrected:
+                pb = p.get("pbits")
+                if pb is not None:
+                    pre_len = preamble_bytes * 8
+                    sync_len = len(SYNC_BITS)
+                    sync_bytes = bytes_from_bits(pb[pre_len:pre_len + sync_len])
+                    pay_bytes = bytes_from_bits(pb[pre_len + sync_len:])
+                    data = bytes([0xAA]) * preamble_bytes + sync_bytes + pay_bytes
+                else:
+                    data = bytes([0xAA]) * preamble_bytes + SYNC_BYTES + payload
+            else:
+                data = bytes([0xAA]) * preamble_bytes + SYNC_BYTES + payload
+            bits = uart_encode_bytes(data)
+        else:
+            bits = np.concatenate([
+                preamble_bits(preamble_bytes),
+                SYNC_BITS,
+                bits_msb(payload),
+            ])
+        if start < 0:
+            continue
+        for k, b in enumerate(bits):
+            a = start + k * m
+            if a >= target_len:
+                break
+            out[a:min(a + m, target_len)] = b
     return out
 
 
@@ -375,10 +484,11 @@ def refine_packets(ch1, spb, packets, starts, preamble_bytes):
     and that grid lands ~0.5-1 bit off the real data.  Each cell is then
     majority-voted so sub-bit glitches cannot flip it.
 
-    Returns (packets, grid_starts): packets get exact payloads; grid_starts
-    are the sample positions of each packet's first bit (used to place the
-    clean GDO2 channel in line with the raw demod edges, while the GDO0
-    `starts` remain the reference for the analog FSK render).
+    Returns (packets, grid_starts): packets get exact payloads and the
+    error-corrected full-packet bits (`p["pbits"]`, preamble + sync + payload);
+    grid_starts are the sample positions of each packet's first bit (used to
+    place the clean GDO2 channel in line with the raw demod edges, while the
+    GDO0 `starts` remain the reference for the analog FSK render).
     """
     pre_len = preamble_bytes * 8
     sync_len = len(SYNC_BITS)
@@ -406,8 +516,14 @@ def refine_packets(ch1, spb, packets, starts, preamble_bytes):
             # shifted the cell mapping); fall back to the find_packets decode.
             payload = p["payload"]
             errors = p["bit_errors"]
+            pbits = np.concatenate([
+                preamble_bits(preamble_bytes),
+                SYNC_BITS,
+                bits_msb(payload),
+            ])
         p["payload"] = payload
         p["bit_errors"] = errors
+        p["pbits"] = pbits
         grid_starts.append(int(qstarts[j0]) if 0 <= j0 < len(qstarts) else 0)
     return packets, grid_starts
 
@@ -467,6 +583,53 @@ def cmd_decode(args):
     payload_ok = sum(1 for p in packets if not p["bit_errors"])
     print(f"clean_packets={good}/{len(packets)} payload_ok={payload_ok}/{len(packets)}")
     return packets
+
+
+def cmd_clean(args):
+    """Error-correct the raw GDO2 signal (same length, no re-encode) and report
+    the before/after decode quality: glitch filter + edge-resynced cells +
+    majority vote + noise-tail gating (see clean_raw_gdo2).  Also writes a
+    `<base>_clean.raw` (bit0=GDO0, bit1=corrected GDO2) for comparison."""
+    ch0, ch1, rate = load_raw(args.raw, args.rate)
+    seed = args.spb or (rate / BPS)
+    spb, bps, windows = detect_datarate_iter(ch0, ch1, rate, seed,
+                                             args.preamble, args.glitch)
+    ch1c = clean_raw_gdo2(ch1, spb, windows, args.glitch)
+    ntrans_raw = int(np.count_nonzero(ch1[1:] != ch1[:-1]))
+    ntrans_cln = int(np.count_nonzero(ch1c[1:] != ch1c[:-1]))
+    nsamp = len(ch1)
+    active = sum(e - s for s, e in windows)
+    print(f"rate={rate:.1f} Hz spb={spb:.3f} bps={bps:.0f} "
+          f"samples={nsamp} windows={len(windows)} active={active} "
+          f"({100.0 * active / nsamp:.1f}% of window)")
+
+    def decode(ch):
+        bits = clean_bits(np.asarray(ch, np.uint8), spb, args.glitch)
+        packets = find_packets(bits, spb, args.preamble)
+        starts = packet_starts(ch0, spb, packets, args.preamble)
+        packets, _ = refine_packets(np.asarray(ch, np.uint8), spb, packets,
+                                    starts, args.preamble)
+        return packets
+
+    raw_pk = decode(ch1)
+    cln_pk = decode(ch1c)
+    for label, pk in (("raw", raw_pk), ("clean_raw", cln_pk)):
+        err = sum(p["bit_errors"] for p in pk)
+        good = sum(1 for p in pk if p["preamble_ok"] and not p["bit_errors"])
+        print(f"{label:9s} packets={len(pk)} payload_ok={good}/{len(pk)} "
+              f"bit_errors={err}")
+    print(f"transitions raw={ntrans_raw} clean_raw={ntrans_cln} "
+          f"(-{100.0 * (ntrans_raw - ntrans_cln) / max(ntrans_raw, 1):.0f}%)")
+    if cln_pk:
+        payloads = " ".join("".join(f"{b:02X}" for b in p["payload"])
+                            for p in cln_pk)
+        print(f"clean_raw payloads: {payloads}")
+    out = args.out or (args.raw.rsplit(".raw", 1)[0] + "_clean.raw")
+    with open(out, "wb") as f:
+        for a, b in zip(ch0, ch1c):
+            f.write(bytes([(a & 1) | ((b & 1) << 1)]))
+    print(f"wrote {out}")
+    return cln_pk
 
 
 def cmd_regen(args):
@@ -618,6 +781,14 @@ def main():
                                       "raw samples for hand verification")
     common_args(m)
     m.set_defaults(func=cmd_manual)
+
+    c = sub.add_parser("clean", help="error-correct the raw GDO2 signal "
+                                     "(glitch filter + edge resync + majority "
+                                     "vote + noise gating) and report "
+                                     "before/after decode quality")
+    common_args(c)
+    c.add_argument("--out", default=None, help="output <base>_clean.raw")
+    c.set_defaults(func=cmd_clean)
 
     args = ap.parse_args()
     packets = args.func(args)
