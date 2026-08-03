@@ -8,11 +8,11 @@ menu "SUMP Capture"
 
             *** RECOMMENDED: USB Serial JTAG ***
 
-            USB mode: OLS on USB Serial JTAG (typically COM6).
+            USB mode: OLS on USB Serial JTAG (typically COM7).
                       PulseView connects here via OLS driver.
-                      Console on UART0 (typically COM7).
+                      Console on UART0 (typically COM6).
 
-            UART mode: OLS on UART0 (typically COM7).
+            UART mode: OLS on UART0 (typically COM6).
                        CAUTION: When PulseView opens a COM port it
                        asserts DTR/RTS, which on ESP32 dev boards are
                        wired to EN (reset) and BOOT.  This causes a
@@ -30,17 +30,17 @@ menu "SUMP Capture"
         config SUMP_TRANSPORT_USB
             bool "USB Serial JTAG (Recommended)"
             help
-                OLS protocol uses USB Serial JTAG (typically COM6).
+                OLS protocol uses USB Serial JTAG (typically COM7).
                 This is the recommended mode because the native USB
                 peripheral does not route through a USB-UART bridge,
                 so opening the port never triggers a hardware reset.
                 PulseView connects here via the OLS driver.
-                IDF console routes to UART0 (typically COM7).
+                IDF console routes to UART0 (typically COM6).
 
         config SUMP_TRANSPORT_UART
             bool "UART0 (DTR reset risk -- not recommended)"
             help
-                OLS protocol uses UART0 (typically COM7).
+                OLS protocol uses UART0 (typically COM6).
                 WARNING: PulseView will toggle DTR when opening this
                 port, causing the ESP32 to reset.  The ROM bootloader
                 boot text will then corrupt the SUMP handshake.  To
@@ -94,7 +94,7 @@ menu "SUMP Capture"
 
     config SUMP_GDO2_MODE
         int "GDO2 output mode (IOCFG2 register value)"
-        default 6
+        default 13
         range 0 47
         help
             CC1101 IOCFG2 output mode for the 2nd SUMP channel.

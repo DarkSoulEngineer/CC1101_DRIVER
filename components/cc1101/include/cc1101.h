@@ -142,7 +142,7 @@
 
 /* PKTCTRL0 PKT_FORMAT (bits [5:4]) */
 #define CC1101_PKT_FORMAT_NORMAL      (0 << 4)
-#define CC1101_PKT_FORMAT_ASYNC       (1 << 4)
+#define CC1101_PKT_FORMAT_ASYNC       (3 << 4)
 #define CC1101_PKT_FORMAT_RANDOM      (2 << 4)
 
 /* PKTCTRL0 LENGTH_CONFIG (bits [3:2]) */
@@ -325,6 +325,14 @@ typedef struct cc1101_dev {
     bool                append_status;
     volatile bool       tx_pending;
     TaskHandle_t        tx_caller_task;
+
+    /* Async serial RX app config (set by cc1101_config_async_rx) */
+    uint32_t async_freq_hz;
+    uint32_t async_datarate_bps;
+    uint8_t  async_deviation;
+    uint8_t  async_chanbw;
+    uint8_t  async_gdo2_mode;
+    uint32_t status_period_ms;
 } cc1101_handle_t;
 
 /* ============================================================
@@ -351,6 +359,48 @@ void cc1101_set_tx_mode(cc1101_handle_t *dev);
 void cc1101_set_rx_mode(cc1101_handle_t *dev);
 bool cc1101_receive_packet(cc1101_handle_t *dev, uint8_t *buffer, size_t *len);
 void cc1101_config(cc1101_handle_t *dev);
+
+/* ============================================================
+ * PUBLIC API - APP-LEVEL CONFIG / DIAGNOSTICS
+ *
+ *   High-level helpers that configure the radio for the common
+ *   "transparent async serial" sniffing use-case and provide
+ *   diagnostics. These live here so application code stays thin.
+ * ============================================================ */
+
+/* Configure the CC1101 as a transparent async-serial RX: 2FSK, no sync,
+ * no packet layer, raw demodulated bits out on GDO0 (and GDO2 via
+ * gdo2_mode). Enters RX. Parameters are remembered on the handle so
+ * cc1101_tx_test() can restore them. */
+esp_err_t cc1101_config_async_rx(cc1101_handle_t *dev, uint32_t freq_hz,
+                                 uint32_t datarate_bps, uint8_t deviation,
+                                 uint8_t chanbw, uint8_t gdo2_mode);
+
+/* Transmit a fixed test packet (sync 0xDEAF, payload 0x01, +10 dBm),
+ * then restore the async-serial RX configuration set by
+ * cc1101_config_async_rx(). */
+esp_err_t cc1101_tx_test(cc1101_handle_t *dev);
+
+/* Transmit a fixed test packet (sync 0xDEAF, payload 0x01, +10 dBm)
+ * while preserving the current RX configuration (registers restored after TX).
+ * Useful for loopback testing when RX is in packet mode with sync word. */
+esp_err_t cc1101_tx_test_preserve_rx(cc1101_handle_t *dev);
+
+/* Log the key config + live status registers once (for boot diagnostics). */
+void cc1101_log_registers(cc1101_handle_t *dev);
+
+/* Spawn a task that logs MARCSTATE/PKTSTATUS/RSSI/RXBYTES every period_ms. */
+void cc1101_start_status_monitor(cc1101_handle_t *dev, uint32_t period_ms);
+
+/* Emit raw RSSI bytes from a frequency sweep (one byte per step). */
+typedef void (*cc1101_sweep_output_fn)(const uint8_t *buf, size_t len);
+
+/* Sweep RX frequency from start_hz to end_hz in step_hz steps, reading the
+ * RSSI status register at each step and streaming one raw byte per step via
+ * out(). Restores the async-RX configuration (freq/datarate/...) afterwards. */
+void cc1101_freq_sweep(cc1101_handle_t *dev, uint32_t start_hz,
+                       uint32_t end_hz, uint32_t step_hz,
+                       cc1101_sweep_output_fn out);
 
 /* ============================================================
  * PUBLIC API - RUNTIME ADJUSTMENTS

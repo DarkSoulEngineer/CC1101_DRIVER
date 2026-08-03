@@ -62,7 +62,7 @@ void app_main(void)
 
     hw_init_gdo0_input();
 
-    if (cc1101_init(&radio, cc1101_handle,
+    if (cc1101_init(&radio, hw_cc1101_spi,
                     PIN_NUM_CS, PIN_NUM_MISO, PIN_NUM_GDO0) != ESP_OK) {
         ESP_LOGE(TAG, "CC1101 init failed");
         while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }

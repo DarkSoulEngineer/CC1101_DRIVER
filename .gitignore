@@ -76,3 +76,5 @@ __pycache__/
 venv/
 .env
 *.egg-info/
+
+scripts/signals/*

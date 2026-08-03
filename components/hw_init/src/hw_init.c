@@ -3,10 +3,13 @@
 
 static const char *TAG = "HW_INIT";
 
+spi_device_handle_t hw_cc1101_spi = NULL;
+
 esp_err_t init_hardware(void)
 {
     esp_err_t ret = hw_spi_init(PIN_NUM_MOSI, PIN_NUM_MISO, PIN_NUM_CLK,
-                                PIN_NUM_CS, CC1101_SPI_SPEED_HZ);
+                                PIN_NUM_CS, CC1101_SPI_SPEED_HZ,
+                                &hw_cc1101_spi);
     if (ret != ESP_OK) {
         return ret;
     }

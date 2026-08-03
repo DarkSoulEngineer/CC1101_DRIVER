@@ -2,6 +2,7 @@
 #define HW_INIT_H
 
 #include "driver/gpio.h"
+#include "driver/spi_master.h"
 #include "esp_err.h"
 #include "sdkconfig.h"
 
@@ -50,7 +51,13 @@
 #define CC1101_SPI_SPEED_HZ 1000000
 #endif
 
+/* SPI device handle for the CC1101, created by init_hardware(). */
+extern spi_device_handle_t hw_cc1101_spi;
+
+/* Initialize board peripherals: SPI bus + CC1101 device, native USB. */
 esp_err_t init_hardware(void);
+
+/* Configure the GDO status/data pins as digital inputs. */
 esp_err_t hw_init_gdo0_input(void);
 esp_err_t hw_init_gdo2_input(void);
 

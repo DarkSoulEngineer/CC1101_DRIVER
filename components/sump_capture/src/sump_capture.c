@@ -8,6 +8,7 @@
 #include "driver/gptimer.h"
 #include "sump_capture.h"
 #include "esp_task_wdt.h"
+#include "freertos/stream_buffer.h"
 
 #if CONFIG_SUMP_TRANSPORT_UART
 #include "driver/uart.h"
@@ -26,11 +27,18 @@ static uint32_t s_buf_size;
 
 static gptimer_handle_t s_timer;
 static TaskHandle_t     s_stream_task;
+static capture_tx_cb_t  s_tx_cb;
+static capture_freq_sweep_fn s_sweep_cb;
+
+/* Continuous stream state */
+static StreamBufferHandle_t s_stream_buf;
+static volatile bool        s_streaming;
 
 /* ISR state */
 static volatile uint32_t s_write_idx;
 static volatile uint32_t s_total_samples;
 static volatile bool    s_done;
+static volatile bool    s_capture_active;
 
 /* ── transport ─────────────────────────────────────────────────────── */
 #if CONFIG_SUMP_TRANSPORT_UART
@@ -59,6 +67,25 @@ static void transport_write(const uint8_t *data, size_t len)
     uart_write_bytes(TRANSPORT_UART, data, len);
 }
 
+static bool transport_write_timeout(const uint8_t *data, size_t len,
+                                    uint32_t timeout_ms)
+{
+    TickType_t t0 = xTaskGetTickCount();
+    size_t written = 0;
+    while (written < len) {
+        int w = uart_write_bytes(TRANSPORT_UART, data + written, len - written);
+        if (w <= 0) {
+            if ((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS > timeout_ms) {
+                return false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        } else {
+            written += w;
+        }
+    }
+    return true;
+}
+
 static int transport_read(uint8_t *buf, size_t len)
 {
     size_t total = 0;
@@ -69,6 +96,11 @@ static int transport_read(uint8_t *buf, size_t len)
         total += n;
     }
     return total;
+}
+
+static int transport_read_available(uint8_t *buf, size_t len)
+{
+    return uart_read_bytes(TRANSPORT_UART, buf, len, pdMS_TO_TICKS(5));
 }
 
 static void transport_drain(void)
@@ -112,6 +144,31 @@ static void transport_write(const uint8_t *data, size_t len)
     }
 }
 
+static bool transport_write_timeout(const uint8_t *data, size_t len,
+                                    uint32_t timeout_ms)
+{
+    const size_t chunk = 1024;
+    size_t written = 0;
+    TickType_t t0 = xTaskGetTickCount();
+    while (written < len) {
+        size_t n = len - written;
+        if (n > chunk) {
+            n = chunk;
+        }
+        int w = usb_serial_jtag_write_bytes(data + written, n,
+                                            pdMS_TO_TICKS(1000));
+        if (w <= 0) {
+            if ((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS > timeout_ms) {
+                return false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        } else {
+            written += w;
+        }
+    }
+    return true;
+}
+
 static int transport_read(uint8_t *buf, size_t len)
 {
     size_t total = 0;
@@ -124,6 +181,11 @@ static int transport_read(uint8_t *buf, size_t len)
         total += n;
     }
     return total;
+}
+
+static int transport_read_available(uint8_t *buf, size_t len)
+{
+    return usb_serial_jtag_read_bytes(buf, len, pdMS_TO_TICKS(5));
 }
 
 static void transport_drain(void)
@@ -141,7 +203,24 @@ static IRAM_ATTR bool timer_isr_cb(gptimer_handle_t timer,
                                     const gptimer_alarm_event_data_t *edata,
                                     void *user_data)
 {
+    uint8_t sample = 0;
+    if (gpio_get_level(g_state.gdo0_pin)) sample |= 0x01;
+    if (g_state.gdo2_pin >= 0 && gpio_get_level(g_state.gdo2_pin)) sample |= 0x02;
+
+    if (s_streaming) {
+        BaseType_t wake = pdFALSE;
+        xStreamBufferSendFromISR(s_stream_buf, &sample, 1, &wake);
+        return wake;
+    }
+
+    /* Guard against stale ISR invocations (e.g. from a just-stopped stream):
+     * only the active capture may complete and notify the stream task. */
+    if (!s_capture_active) {
+        return false;
+    }
+
     if (s_write_idx >= s_total_samples) {
+        s_capture_active = false;
         gptimer_stop(timer);
         s_done = true;
         BaseType_t wake = pdFALSE;
@@ -150,10 +229,6 @@ static IRAM_ATTR bool timer_isr_cb(gptimer_handle_t timer,
         }
         return wake;
     }
-
-    uint8_t sample = 0;
-    if (gpio_get_level(g_state.gdo0_pin)) sample |= 0x01;
-    if (g_state.gdo2_pin >= 0 && gpio_get_level(g_state.gdo2_pin)) sample |= 0x02;
 
     s_capture_buf[s_write_idx] = sample;
     s_write_idx++;
@@ -186,6 +261,37 @@ static void timer_init(uint32_t sample_rate_hz)
              (unsigned long)(1000000 / sample_rate_hz));
 }
 
+/* ── continuous stream helpers ────────────────────────────────────── */
+static void stream_start(uint32_t rate)
+{
+    gptimer_stop(s_timer);
+    gptimer_disable(s_timer);
+
+    gptimer_alarm_config_t acfg = {
+        .reload_count = 0,
+        .alarm_count  = 1000000 / rate,
+        .flags.auto_reload_on_alarm = true,
+    };
+    gptimer_set_alarm_action(s_timer, &acfg);
+
+    xStreamBufferReset(s_stream_buf);
+    s_streaming = true;
+
+    gptimer_enable(s_timer);
+    gptimer_start(s_timer);
+    ESP_LOGI(TAG, "Streaming started: %lu Hz", (unsigned long)rate);
+}
+
+static void stream_stop(void)
+{
+    gptimer_stop(s_timer);
+    s_streaming        = false;
+    s_capture_active   = false;
+    s_write_idx        = 0;
+    s_total_samples    = 0;
+    ESP_LOGI(TAG, "Streaming stopped");
+}
+
 /* ── stream task: wait for capture, send raw bytes over transport ──── */
 static void stream_task(void *arg)
 {
@@ -196,17 +302,103 @@ static void stream_task(void *arg)
      * idle task either. */
 
     while (1) {
-        uint8_t hdr[9];
-        int len = transport_read(hdr, sizeof(hdr));
-        if (len != 9 || hdr[0] != CAPTURE_CMD_START) {
+        uint8_t cmd;
+        if (transport_read(&cmd, 1) != 1) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
-        uint32_t rate   = (uint32_t)hdr[1] | ((uint32_t)hdr[2] << 8)
-                        | ((uint32_t)hdr[3] << 16) | ((uint32_t)hdr[4] << 24);
-        uint32_t count  = (uint32_t)hdr[5] | ((uint32_t)hdr[6] << 8)
-                        | ((uint32_t)hdr[7] << 16) | ((uint32_t)hdr[8] << 24);
+        if (cmd == CAPTURE_CMD_TX) {
+            ESP_LOGI(TAG, "TX command received");
+            if (s_tx_cb) {
+                s_tx_cb();
+            }
+            continue;
+        }
+
+        if (cmd == CAPTURE_CMD_STREAM) {
+            uint8_t rb[4];
+            if (transport_read(rb, 4) != 4) {
+                continue;
+            }
+            uint32_t rate = (uint32_t)rb[0] | ((uint32_t)rb[1] << 8)
+                          | ((uint32_t)rb[2] << 16) | ((uint32_t)rb[3] << 24);
+            if (rate == 0 || rate > 500000) {
+                ESP_LOGW(TAG, "Bad stream rate %lu, clamping to 500000",
+                         (unsigned long)rate);
+                rate = 500000;
+            }
+            g_state.sample_rate = rate;
+            stream_start(rate);
+
+            /* Live loop: drain ISR stream buffer to USB, watch for stop. */
+            uint8_t chunk[256];
+            bool aborted = false;
+            while (1) {
+                size_t got = xStreamBufferReceive(s_stream_buf, chunk,
+                                                  sizeof(chunk),
+                                                  pdMS_TO_TICKS(5));
+                if (got > 0) {
+                    if (!transport_write_timeout(chunk, got, 5000)) {
+                        aborted = true;
+                        break;
+                    }
+                }
+                uint8_t b;
+                if (transport_read_available(&b, 1) == 1) {
+                    if (b == CAPTURE_CMD_STOP) {
+                        break;
+                    }
+                }
+            }
+            stream_stop();
+            if (aborted) {
+                ESP_LOGW(TAG, "Stream aborted (USB write stalled)");
+            }
+            continue;
+        }
+
+        if (cmd == CAPTURE_CMD_SWEEP) {
+            uint8_t rb[12];
+            if (transport_read(rb, sizeof(rb)) != sizeof(rb)) {
+                continue;
+            }
+            uint32_t start = (uint32_t)rb[0] | ((uint32_t)rb[1] << 8)
+                           | ((uint32_t)rb[2] << 16) | ((uint32_t)rb[3] << 24);
+            uint32_t end   = (uint32_t)rb[4] | ((uint32_t)rb[5] << 8)
+                           | ((uint32_t)rb[6] << 16) | ((uint32_t)rb[7] << 24);
+            uint32_t step  = (uint32_t)rb[8] | ((uint32_t)rb[9] << 8)
+                           | ((uint32_t)rb[10] << 16) | ((uint32_t)rb[11] << 24);
+            if (step == 0 || start > end) {
+                ESP_LOGW(TAG, "Bad sweep range: %lu..%lu step %lu",
+                         (unsigned long)start, (unsigned long)end,
+                         (unsigned long)step);
+                continue;
+            }
+            ESP_LOGI(TAG, "Sweep: %lu..%lu step %lu",
+                     (unsigned long)start, (unsigned long)end,
+                     (unsigned long)step);
+            if (s_sweep_cb) {
+                s_sweep_cb(start, end, step);
+            }
+            ESP_LOGI(TAG, "Sweep done");
+            continue;
+        }
+
+        if (cmd != CAPTURE_CMD_START) {
+            ESP_LOGW(TAG, "Unknown command 0x%02X", cmd);
+            continue;
+        }
+
+        uint8_t hdr[8];
+        if (transport_read(hdr, sizeof(hdr)) != sizeof(hdr)) {
+            continue;
+        }
+
+        uint32_t rate   = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8)
+                        | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
+        uint32_t count  = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8)
+                        | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
 
         if (rate == 0 || rate > 500000) {
             ESP_LOGW(TAG, "Bad rate %lu, clamping to 500000", (unsigned long)rate);
@@ -241,11 +433,17 @@ static void stream_task(void *arg)
         s_write_idx      = 0;
         s_total_samples  = count;
         s_done           = false;
+        s_capture_active = true;
+
+        /* Drain any stale notification left over from a previous stream or
+         * capture, so the blocking take below only returns on THIS capture. */
+        ulTaskNotifyTake(pdTRUE, 0);
 
         ESP_ERROR_CHECK(gptimer_start(s_timer));
 
         /* Wait for ISR to finish */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        s_capture_active = false;
 
         ESP_LOGI(TAG, "Capture done: %lu bytes, streaming...",
                  (unsigned long)count);
@@ -258,6 +456,27 @@ static void stream_task(void *arg)
 }
 
 /* ── public API ────────────────────────────────────────────────────── */
+void capture_set_tx_cb(capture_tx_cb_t cb)
+{
+    s_tx_cb = cb;
+}
+
+void capture_set_freq_sweep_cb(capture_freq_sweep_fn cb)
+{
+    s_sweep_cb = cb;
+}
+
+int capture_send(const uint8_t *data, size_t len)
+{
+    transport_write(data, len);
+    return (int)len;
+}
+
+bool capture_is_active(void)
+{
+    return s_capture_active || s_streaming;
+}
+
 esp_err_t capture_init(gpio_num_t gdo0_pin, gpio_num_t gdo2_pin)
 {
     memset(&g_state, 0, sizeof(g_state));
@@ -282,6 +501,13 @@ esp_err_t capture_init(gpio_num_t gdo0_pin, gpio_num_t gdo2_pin)
     }
 
     ESP_LOGI(TAG, "Buffer: %p (%lu bytes)", s_capture_buf, (unsigned long)s_buf_size);
+
+    /* Continuous-stream ring buffer (ISR producer / task consumer) */
+    s_stream_buf = xStreamBufferCreate(CAPTURE_STREAM_BUF_SIZE, 1);
+    if (!s_stream_buf) {
+        ESP_LOGE(TAG, "Failed to create stream buffer");
+        return ESP_ERR_NO_MEM;
+    }
 
     /* Configure GDO pins */
     gpio_config_t iocfg = {
@@ -316,7 +542,7 @@ esp_err_t capture_init(gpio_num_t gdo0_pin, gpio_num_t gdo2_pin)
     uint8_t marker = 0xAA;
     transport_write(&marker, 1);
 
-    ESP_LOGI(TAG, "Ready. Waiting for start command [0x01][rate:4LE][count:4LE]");
+    ESP_LOGI(TAG, "Ready. [0x01][rate:4LE][count:4LE]=capture [0x02]=TX [0x03][rate:4LE]=stream [0x04]=stop");
 
     return ESP_OK;
 }

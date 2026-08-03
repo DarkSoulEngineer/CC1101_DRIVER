@@ -1979,11 +1979,9 @@ CONFIG_ESP_SYSTEM_EVENT_QUEUE_SIZE=32
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2304
 # default:
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=3584
-# default:
 CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
 # default:
 # CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1 is not set
-# default:
 # CONFIG_ESP_MAIN_TASK_AFFINITY_NO_AFFINITY is not set
 # default:
 CONFIG_ESP_MAIN_TASK_AFFINITY=0x0
@@ -3588,15 +3586,6 @@ CONFIG_WL_SECTOR_SIZE=4096
 # end of Wear Levelling
 
 #
-# USB Interface (USB Serial/JTAG)
-#
-# default:
-CONFIG_USB_INTERFACE_USJ_TX_BUFFER_SIZE=4096
-# default:
-CONFIG_USB_INTERFACE_USJ_RX_BUFFER_SIZE=256
-# end of USB Interface (USB Serial/JTAG)
-
-#
 # CC1101 Radio Configuration
 #
 # default:
@@ -3666,12 +3655,14 @@ CONFIG_CC1101_PA_VALUE=0
 # end of CC1101 Radio Configuration
 
 #
-# CC1101 Hardware Pinout
+# CC1101 Hardware (Board Support)
 #
-# default:
-CONFIG_CC1101_PIN_GDO0=3
-# default:
-CONFIG_CC1101_PIN_GDO2=4
+
+#
+# CC1101 Pinout
+#
+CONFIG_CC1101_PIN_GDO0=10
+CONFIG_CC1101_PIN_GDO2=11
 # default:
 CONFIG_CC1101_PIN_CS=5
 # default:
@@ -3682,7 +3673,17 @@ CONFIG_CC1101_PIN_MOSI=7
 CONFIG_CC1101_PIN_MISO=6
 # default:
 CONFIG_CC1101_SPI_HZ=1000000
-# end of CC1101 Hardware Pinout
+# end of CC1101 Pinout
+
+#
+# USB Interface (USB Serial/JTAG)
+#
+# default:
+CONFIG_USB_INTERFACE_USJ_TX_BUFFER_SIZE=4096
+# default:
+CONFIG_USB_INTERFACE_USJ_RX_BUFFER_SIZE=256
+# end of USB Interface (USB Serial/JTAG)
+# end of CC1101 Hardware (Board Support)
 
 #
 # SUMP Capture
@@ -3697,7 +3698,7 @@ CONFIG_SUMP_MAX_SAMPLES=262144
 # default:
 CONFIG_SUMP_NUM_CHANNELS=2
 # default:
-CONFIG_SUMP_GDO2_MODE=6
+CONFIG_SUMP_GDO2_MODE=13
 # default:
 CONFIG_SUMP_GDO2_PIN=4
 # default:

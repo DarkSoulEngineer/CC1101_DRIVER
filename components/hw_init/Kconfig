@@ -1,55 +1,74 @@
-menu "CC1101 Hardware Pinout"
+menu "CC1101 Hardware (Board Support)"
 
-    config CC1101_PIN_GDO0
-        int "GDO0 pin"
-        default 3
-        range 0 48
-        help
-            GPIO pin connected to CC1101 GDO0 (interrupt / data output).
+    menu "CC1101 Pinout"
+        config CC1101_PIN_GDO0
+            int "GDO0 pin"
+            default 10
+            range 0 48
+            help
+                GPIO pin connected to CC1101 GDO0 (interrupt / data output).
 
-    
-    config CC1101_PIN_GDO2
-        int "GDO2 pin"
-        default 4
-        range 0 48
-        help
-            GPIO pin connected to CC1101 GDO0 (interrupt / data output).
+        config CC1101_PIN_GDO2
+            int "GDO2 pin"
+            default 11
+            range 0 48
+            help
+                GPIO pin connected to CC1101 GDO2 (data output / clock).
 
+        config CC1101_PIN_CS
+            int "CS (chip select) pin"
+            default 5
+            range 0 48
+            help
+                GPIO pin connected to CC1101 CSN (active low chip select).
 
-    config CC1101_PIN_CS
-        int "CS (chip select) pin"
-        default 5
-        range 0 48
-        help
-            GPIO pin connected to CC1101 CSN (active low chip select).
+        config CC1101_PIN_SCK
+            int "SCK (SPI clock) pin"
+            default 15
+            range 0 48
+            help
+                GPIO pin connected to CC1101 SCLK.
 
-    config CC1101_PIN_SCK
-        int "SCK (SPI clock) pin"
-        default 15
-        range 0 48
-        help
-            GPIO pin connected to CC1101 SCLK.
+        config CC1101_PIN_MOSI
+            int "MOSI pin"
+            default 7
+            range 0 48
+            help
+                GPIO pin connected to CC1101 MOSI (master out slave in).
 
-    config CC1101_PIN_MOSI
-        int "MOSI pin"
-        default 7
-        range 0 48
-        help
-            GPIO pin connected to CC1101 MOSI (master out slave in).
+        config CC1101_PIN_MISO
+            int "MISO pin"
+            default 6
+            range 0 48
+            help
+                GPIO pin connected to CC1101 MISO (master in slave out).
 
-    config CC1101_PIN_MISO
-        int "MISO pin"
-        default 6
-        range 0 48
-        help
-            GPIO pin connected to CC1101 MISO (master in slave out).
+        config CC1101_SPI_HZ
+            int "SPI clock speed (Hz)"
+            default 1000000
+            range 100000 8000000
+            help
+                SPI clock frequency in Hz. CC1101 supports up to 10 MHz,
+                recommend 1 MHz for reliability.
+    endmenu
 
-    config CC1101_SPI_HZ
-        int "SPI clock speed (Hz)"
-        default 1000000
-        range 100000 8000000
-        help
-            SPI clock frequency in Hz. CC1101 supports up to 10 MHz,
-            recommend 1 MHz for reliability.
+    menu "USB Interface (USB Serial/JTAG)"
+        config USB_INTERFACE_USJ_TX_BUFFER_SIZE
+            int "USB Serial/JTAG TX ring buffer size (bytes)"
+            default 4096
+            range 256 16384
+            help
+                Ring buffer size for the USB Serial/JTAG TX direction
+                (data sent from device to host). Keep it well above the
+                streaming chunk size (see sump_capture transport_write).
+
+        config USB_INTERFACE_USJ_RX_BUFFER_SIZE
+            int "USB Serial/JTAG RX ring buffer size (bytes)"
+            default 256
+            range 64 4096
+            help
+                Ring buffer size for the USB Serial/JTAG RX direction
+                (data received from host).
+    endmenu
 
 endmenu

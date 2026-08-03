@@ -4,11 +4,14 @@
 
 static const char *TAG = "SPI_INIT";
 
-spi_device_handle_t cc1101_handle = NULL;
-
 esp_err_t hw_spi_init(int mosi_io, int miso_io, int sclk_io, int cs_io,
-                      uint32_t speed_hz)
+                      uint32_t speed_hz, spi_device_handle_t *out_dev)
 {
+    if (!out_dev) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_dev = NULL;
+
     gpio_set_direction(cs_io, GPIO_MODE_OUTPUT);
     gpio_set_level(cs_io, 1);
 
@@ -34,7 +37,7 @@ esp_err_t hw_spi_init(int mosi_io, int miso_io, int sclk_io, int cs_io,
         return ret;
     }
 
-    ret = spi_bus_add_device(SPI3_HOST, &devcfg, &cc1101_handle);
+    ret = spi_bus_add_device(SPI3_HOST, &devcfg, out_dev);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI Device Add Failed: %s", esp_err_to_name(ret));
         return ret;

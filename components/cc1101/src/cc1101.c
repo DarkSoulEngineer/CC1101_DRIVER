@@ -227,6 +227,13 @@ esp_err_t cc1101_init(cc1101_handle_t *dev,
         return ESP_ERR_NO_MEM;
     }
 
+    dev->async_freq_hz       = 0;
+    dev->async_datarate_bps  = 0;
+    dev->async_deviation     = 0;
+    dev->async_chanbw        = 0;
+    dev->async_gdo2_mode     = CC1101_GDO_HIGH_Z;
+    dev->status_period_ms    = 0;
+
     cc1101_reset(dev);
     return ESP_OK;
 }
@@ -316,7 +323,7 @@ esp_err_t cc1101_configure(cc1101_handle_t *dev,
     calc_datarate(cfg->modem.datarate_bps, &drate_e, &drate_m);
 
     uint8_t mdmcfg4 = CC1101_MDMCFG4_VALUE(cfg->modem.chanbw >> 6,
-                                             cfg->modem.chanbw & 0x3,
+                                             (cfg->modem.chanbw >> 4) & 0x3,
                                              drate_e);
     cc1101_write_reg(dev, CC1101_MDMCFG4, mdmcfg4);
     cc1101_write_reg(dev, CC1101_MDMCFG3, drate_m);
@@ -460,6 +467,11 @@ bool cc1101_receive_packet(cc1101_handle_t *dev,
                            uint8_t *buffer,
                            size_t *len)
 {
+    if (!buffer || !len) {
+        ESP_LOGE(TAG, "Invalid RX args");
+        return false;
+    }
+
     uint8_t rx_bytes = cc1101_read_status(dev, CC1101_RXBYTES);
 
     if (rx_bytes & 0x80) {
@@ -470,12 +482,24 @@ bool cc1101_receive_packet(cc1101_handle_t *dev,
     if ((rx_bytes & 0x7F) == 0)
         return false;
 
-    if (!buffer || !len) {
-        ESP_LOGE(TAG, "Invalid RX args");
-        return false;
+    /* Determine expected packet length from the live config.
+     * Fixed  : PKTLEN bytes, FIFO holds raw data (no length byte).
+     * Variable: first FIFO byte is the length byte.
+     * Infinite: no framing, read whatever is available. */
+    uint8_t length_cfg = (cc1101_read_reg(dev, CC1101_PKTCTRL0) >> 2) & 0x03;
+    uint8_t pkt_len;
+
+    if (length_cfg == CC1101_PKTLEN_VARIABLE) {
+        pkt_len = cc1101_read_reg(dev, CC1101_FIFO_ADDR);
+    } else if (length_cfg == CC1101_PKTLEN_INFINITE) {
+        pkt_len = rx_bytes & 0x7F;
+    } else {
+        /* Fixed length: wait for the complete packet in the FIFO. */
+        pkt_len = cc1101_read_reg(dev, CC1101_PKTLEN);
+        if ((rx_bytes & 0x7F) < pkt_len)
+            return false;
     }
 
-    uint8_t pkt_len = cc1101_read_reg(dev, CC1101_FIFO_ADDR);
     if (pkt_len > *len) {
         ESP_LOGE(TAG, "Packet too large: packet=%u buffer=%u", pkt_len, (unsigned)*len);
         cc1101_set_rx_mode(dev);
@@ -633,9 +657,9 @@ void cc1101_verify_config(cc1101_handle_t *dev, const cc1101_config_t *cfg)
 
     uint8_t drate_e = 0, drate_m = 0;
     calc_datarate(cfg->modem.datarate_bps, &drate_e, &drate_m);
-    uint8_t exp_mdmcfg4 = CC1101_MDMCFG4_VALUE(cfg->modem.chanbw >> 6,
-                                                 cfg->modem.chanbw & 0x3,
-                                                 drate_e);
+uint8_t exp_mdmcfg4 = CC1101_MDMCFG4_VALUE(cfg->modem.chanbw >> 6,
+                                                  (cfg->modem.chanbw >> 4) & 0x3,
+                                                  drate_e);
     uint8_t exp_mdmcfg2 = CC1101_MDMCFG2_VALUE(cfg->modem.dc_filter_off ? 1 : 0,
                                                 cfg->modem.modulation,
                                                 cfg->modem.manchester ? 1 : 0,
@@ -683,4 +707,240 @@ void cc1101_verify_config(cc1101_handle_t *dev, const cc1101_config_t *cfg)
     uint8_t txbytes   = cc1101_read_status_reg(dev, CC1101_TXBYTES) & 0x7F;
     ESP_LOGI(TAG, "  MARCSTATE = 0x%02X  TXBYTES = 0x%02X", marcstate, txbytes);
     ESP_LOGI(TAG, "  RESULT: %d pass, %d fail", pass, fail);
+}
+
+/* ============================================================
+ * APP-LEVEL CONFIG / DIAGNOSTICS
+ * ============================================================ */
+
+esp_err_t cc1101_config_async_rx(cc1101_handle_t *dev, uint32_t freq_hz,
+                                 uint32_t datarate_bps, uint8_t deviation,
+                                 uint8_t chanbw, uint8_t gdo2_mode)
+{
+    if (!dev) return ESP_ERR_INVALID_ARG;
+
+    dev->async_freq_hz      = freq_hz;
+    dev->async_datarate_bps = datarate_bps;
+    dev->async_deviation    = deviation;
+    dev->async_chanbw       = chanbw;
+    dev->async_gdo2_mode    = gdo2_mode;
+
+    cc1101_config_t cfg = CC1101_DEFAULT_CONFIG();
+    cfg.isr_enabled = false;
+    cfg.freq_hz = freq_hz;
+    cfg.modem.modulation    = CC1101_MOD_2FSK_E;
+    cfg.modem.sync_mode     = CC1101_SYNC_NONE_E;
+    cfg.modem.datarate_bps  = datarate_bps;
+    cfg.modem.deviation     = deviation;
+    cfg.modem.chanbw        = chanbw;
+    cfg.packet.mode         = CC1101_PKT_INFINITE_E;
+    cfg.packet.crc_enable   = false;
+    cfg.packet.whitening    = false;
+    cfg.packet.append_status = false;
+    cfg.radio.gdo0_mode     = CC1101_GDO_ASYNC_DATA;
+    cfg.radio.gdo2_mode     = gdo2_mode;
+    cfg.radio.autocal       = CC1101_AUTOCAL_ALWAYS;
+    cfg.radio.pin_mode      = 0x3F;
+
+    esp_err_t ret = cc1101_configure(dev, &cfg);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    /* Transparent async-serial packet format, infinite length, no CRC.
+     * (cc1101_configure does not emit PKT_FORMAT=ASYNC, so force it.) */
+    cc1101_write_reg(dev, CC1101_PKTCTRL0,
+                     CC1101_PKT_FORMAT_ASYNC | CC1101_PKTLEN_INFINITE);
+    cc1101_write_reg(dev, CC1101_PKTCTRL1, 0x04);
+    cc1101_write_reg(dev, CC1101_MCSM1, 0x3F);
+    cc1101_write_reg(dev, CC1101_IOCFG0, CC1101_GDO_ASYNC_DATA);
+    cc1101_write_reg(dev, CC1101_IOCFG2, gdo2_mode);
+    cc1101_set_rx_mode(dev);
+
+    ESP_LOGI(TAG, "Async RX: %lu Hz, %lu bps, dev=0x%02X, chanbw=0x%02X",
+             (unsigned long)freq_hz, (unsigned long)datarate_bps,
+             deviation, chanbw);
+    return ESP_OK;
+}
+
+esp_err_t cc1101_tx_test(cc1101_handle_t *dev)
+{
+    if (!dev) return ESP_ERR_INVALID_ARG;
+
+    uint32_t freq_hz     = dev->async_freq_hz     ? dev->async_freq_hz     : 433920000;
+    uint32_t datarate    = dev->async_datarate_bps ? dev->async_datarate_bps : 2400;
+    uint8_t  deviation   = dev->async_deviation   ? dev->async_deviation   : 0x47;
+
+    ESP_LOGI(TAG, "TX test: 2FSK %lu bps sync=DEAF payload=0x01",
+             (unsigned long)datarate);
+
+    cc1101_config_t tx = CC1101_DEFAULT_CONFIG();
+    tx.freq_hz = freq_hz;
+    tx.modem.modulation    = CC1101_MOD_2FSK_E;
+    tx.modem.datarate_bps  = datarate;
+    tx.modem.sync_mode     = CC1101_SYNC_16_16_E;
+    tx.modem.preamble_bytes = 4;
+    tx.modem.deviation     = deviation;
+    tx.modem.chanbw        = 0x03;
+    tx.packet.mode         = CC1101_PKT_FIXED_E;
+    tx.packet.max_length   = 1;
+    tx.packet.crc_enable   = false;
+    tx.packet.whitening    = false;
+    tx.packet.append_status = false;
+    tx.packet.sync1        = 0xDE;
+    tx.packet.sync0        = 0xAF;
+    tx.pa_value            = CC1101_PA_POS10dBm;
+    tx.radio.gdo0_mode     = CC1101_GDO_SYNC_WORD;
+    tx.radio.gdo2_mode     = CC1101_GDO_HIGH_Z;
+    tx.radio.autocal       = CC1101_AUTOCAL_ALWAYS;
+    tx.radio.pin_mode      = 0x00;
+
+    cc1101_configure(dev, &tx);
+    uint8_t pkt = 0x01;
+    cc1101_transmit(dev, &pkt, 1);
+    bool ok = cc1101_wait_tx_done(dev, 1000);
+    ESP_LOGI(TAG, "TX result: %s", ok ? "OK" : "timeout");
+
+    cc1101_config_async_rx(dev, dev->async_freq_hz, dev->async_datarate_bps,
+                           dev->async_deviation, dev->async_chanbw,
+                           dev->async_gdo2_mode);
+    return ok ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+/* TX test that preserves current RX config (for loopback testing) */
+esp_err_t cc1101_tx_test_preserve_rx(cc1101_handle_t *dev)
+{
+    if (!dev) return ESP_ERR_INVALID_ARG;
+
+    uint32_t freq_hz = dev->async_freq_hz ? dev->async_freq_hz : 433920000;
+    uint32_t datarate = dev->async_datarate_bps ? dev->async_datarate_bps : 2400;
+    uint8_t deviation = dev->async_deviation ? dev->async_deviation : 0x47;
+
+    ESP_LOGI(TAG, "TX test (preserve RX): 2FSK %lu bps sync=DEAF payload=0x01",
+             (unsigned long)datarate);
+
+    /* Save current register state for restore */
+    uint8_t regs_backup[0x3E + 1];
+    for (int i = 0; i <= 0x3E; i++) {
+        regs_backup[i] = cc1101_read_reg(dev, i);
+    }
+
+    cc1101_config_t tx = CC1101_DEFAULT_CONFIG();
+    tx.freq_hz = freq_hz;
+    tx.modem.modulation    = CC1101_MOD_2FSK_E;
+    tx.modem.datarate_bps  = datarate;
+    tx.modem.sync_mode     = CC1101_SYNC_16_16_E;
+    tx.modem.preamble_bytes = 4;
+    tx.modem.deviation     = deviation;
+    tx.modem.chanbw        = 0x03;
+    tx.packet.mode         = CC1101_PKT_FIXED_E;
+    tx.packet.max_length   = 1;
+    tx.packet.crc_enable   = false;
+    tx.packet.whitening    = false;
+    tx.packet.append_status = false;
+    tx.packet.sync1        = 0xDE;
+    tx.packet.sync0        = 0xAF;
+    tx.pa_value            = CC1101_PA_POS10dBm;
+    tx.radio.gdo0_mode     = CC1101_GDO_SYNC_WORD;
+    tx.radio.gdo2_mode     = CC1101_GDO_HIGH_Z;
+    tx.radio.autocal       = CC1101_AUTOCAL_ALWAYS;
+    tx.radio.pin_mode      = 0x00;
+
+    cc1101_configure(dev, &tx);
+    uint8_t pkt = 0x01;
+    cc1101_transmit(dev, &pkt, 1);
+    bool ok = cc1101_wait_tx_done(dev, 1000);
+    ESP_LOGI(TAG, "TX result: %s", ok ? "OK" : "timeout");
+
+    /* Restore registers */
+    for (int i = 0; i <= 0x3E; i++) {
+        cc1101_write_reg(dev, i, regs_backup[i]);
+    }
+    cc1101_set_rx_mode(dev);
+    return ok ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+void cc1101_freq_sweep(cc1101_handle_t *dev, uint32_t start_hz,
+                       uint32_t end_hz, uint32_t step_hz,
+                       cc1101_sweep_output_fn out)
+{
+    if (!dev || !out || step_hz == 0 || start_hz > end_hz) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Sweep: %lu..%lu Hz, step %lu Hz",
+             (unsigned long)start_hz, (unsigned long)end_hz,
+             (unsigned long)step_hz);
+
+    cc1101_strobe(dev, CC1101_SIDLE);
+
+    uint8_t rssi[256];
+    size_t n = 0;
+    for (uint64_t f = start_hz; f <= end_hz; f += step_hz) {
+        cc1101_set_frequency(dev, (uint32_t)f);
+        cc1101_strobe(dev, CC1101_SRX);
+        vTaskDelay(pdMS_TO_TICKS(15));   /* autocal + synth settle */
+        rssi[n++] = (uint8_t)cc1101_read_status_reg(dev, CC1101_RSSI);
+        if (n == sizeof(rssi)) {
+            out(rssi, n);
+            n = 0;
+        }
+    }
+    if (n) {
+        out(rssi, n);
+    }
+
+    ESP_LOGI(TAG, "Sweep done");
+
+    /* Return to the operational async-RX configuration. */
+    cc1101_config_async_rx(dev, dev->async_freq_hz, dev->async_datarate_bps,
+                           dev->async_deviation, dev->async_chanbw,
+                           dev->async_gdo2_mode);
+}
+
+void cc1101_log_registers(cc1101_handle_t *dev)
+{
+    if (!dev) return;
+
+    ESP_LOGI(TAG, "=== CC1101 Register Dump ===");
+    ESP_LOGI(TAG, "  IOCFG2  = 0x%02X",  cc1101_read_reg(dev, CC1101_IOCFG2));
+    ESP_LOGI(TAG, "  IOCFG0  = 0x%02X",  cc1101_read_reg(dev, CC1101_IOCFG0));
+    ESP_LOGI(TAG, "  PKTCTRL1= 0x%02X",  cc1101_read_reg(dev, CC1101_PKTCTRL1));
+    ESP_LOGI(TAG, "  PKTCTRL0= 0x%02X",  cc1101_read_reg(dev, CC1101_PKTCTRL0));
+    ESP_LOGI(TAG, "  SYNC1   = 0x%02X",  cc1101_read_reg(dev, CC1101_SYNC1));
+    ESP_LOGI(TAG, "  SYNC0   = 0x%02X",  cc1101_read_reg(dev, CC1101_SYNC0));
+    ESP_LOGI(TAG, "  PKTLEN  = 0x%02X",  cc1101_read_reg(dev, CC1101_PKTLEN));
+    ESP_LOGI(TAG, "  MDMCFG4 = 0x%02X",  cc1101_read_reg(dev, CC1101_MDMCFG4));
+    ESP_LOGI(TAG, "  MDMCFG3 = 0x%02X",  cc1101_read_reg(dev, CC1101_MDMCFG3));
+    ESP_LOGI(TAG, "  MDMCFG2 = 0x%02X",  cc1101_read_reg(dev, CC1101_MDMCFG2));
+    ESP_LOGI(TAG, "  MCSM1   = 0x%02X",  cc1101_read_reg(dev, CC1101_MCSM1));
+    ESP_LOGI(TAG, "  FREQ    = 0x%02X/0x%02X/0x%02X",
+             cc1101_read_reg(dev, CC1101_FREQ2),
+             cc1101_read_reg(dev, CC1101_FREQ1),
+             cc1101_read_reg(dev, CC1101_FREQ0));
+    ESP_LOGI(TAG, "  MARCSTATE= 0x%02X", cc1101_read_status_reg(dev, CC1101_MARCSTATE) & 0x1F);
+    ESP_LOGI(TAG, "  PKTSTATUS= 0x%02X", cc1101_read_status_reg(dev, CC1101_PKTSTATUS));
+    ESP_LOGI(TAG, "  RSSI    = %d dBm",  (int8_t)cc1101_read_status_reg(dev, CC1101_RSSI) / 2 - 74);
+    ESP_LOGI(TAG, "============================");
+}
+
+static void cc1101_status_monitor_task(void *arg)
+{
+    cc1101_handle_t *dev = (cc1101_handle_t *)arg;
+    for (;;) {
+        int8_t rssi = (int8_t)cc1101_read_status_reg(dev, CC1101_RSSI);
+        uint8_t marc = cc1101_read_status_reg(dev, CC1101_MARCSTATE) & 0x1F;
+        uint8_t pkt  = cc1101_read_status_reg(dev, CC1101_PKTSTATUS);
+        uint8_t rx   = cc1101_read_status_reg(dev, CC1101_RXBYTES);
+        ESP_LOGI(TAG, "MARCSTATE=0x%02X PKTSTATUS=0x%02X RSSI=%d dBm RXBYTES=%d",
+                 marc, pkt, rssi / 2 - 74, rx);
+        vTaskDelay(pdMS_TO_TICKS(dev->status_period_ms));
+    }
+}
+
+void cc1101_start_status_monitor(cc1101_handle_t *dev, uint32_t period_ms)
+{
+    if (!dev || period_ms == 0) return;
+    dev->status_period_ms = period_ms;
+    xTaskCreate(cc1101_status_monitor_task, "rfstatus", 4096, dev, 5, NULL);
 }
