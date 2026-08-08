@@ -13,6 +13,10 @@ CONFIG_SUMP_UART_BAUD=115200
 CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
+# Release (-O2) for ISR timing headroom: the 250 kHz gptimer capture ISR
+# (sump_capture) has ~4 us per sample; -Og (debug) leaves too little margin.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
 # GDO pins moved to avoid USB Serial/JTAG conflict (GPIO 3/4)
 CONFIG_CC1101_PIN_GDO0=10
 CONFIG_CC1101_PIN_GDO2=11

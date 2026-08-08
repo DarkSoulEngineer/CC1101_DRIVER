@@ -30,7 +30,7 @@ static const cc1101_config_t rx_cfg = {
         .preamble_bytes  = 4,
         .datarate_bps    = 2400,
         .deviation       = 0x47,
-        .chanbw          = 0x03,
+        .chanbw          = CC1101_CHANBW_464_KHZ,
         .channel_spacing = 248,
     },
 
@@ -59,7 +59,7 @@ void app_main(void)
     uint8_t data[CC1101_MAX_PACKET_LEN] = {0};
     static cc1101_handle_t radio;
 
-    ESP_LOGI(TAG, "=== RFuzz RX (2FSK 2400 bps, dev 12 kHz) ===");
+    ESP_LOGI(TAG, "=== RFuzz RX (2FSK 2400 bps, dev 48 kHz) ===");
 
     if (init_hardware() != ESP_OK) {
         ESP_LOGE(TAG, "Hardware init failed");
@@ -83,7 +83,7 @@ void app_main(void)
         while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
     }
 
-    ESP_LOGI(TAG, "freq=433.92MHz  modulation=2FSK  rate=2400bps  dev=12kHz");
+    ESP_LOGI(TAG, "freq=433.92MHz  modulation=2FSK  rate=2400bps  dev=48kHz");
     ESP_LOGI(TAG, "preamble=4B  sync=2DD4  CRC=OFF  append_status=ON");
 
     cc1101_set_rx_mode(&radio);

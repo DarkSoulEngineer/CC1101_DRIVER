@@ -6,13 +6,14 @@
 
 ## Overview
 
-The default firmware (`main.c`) implements an **async RX capture** mode:
-- CC1101 configured for transparent 2FSK demodulation (no sync, no packet layer)
-- Raw demodulated bits output on GDO0 (and optionally GDO2)
+The default firmware (`main.c`) implements a **2FSK packet RX + capture** mode:
+- CC1101 configured for 2FSK packet reception (sync word 0xDEAF, fixed 4-byte
+  payload) plus async demodulated bit output
+- GDO0 = sync strobe (rises on sync match), GDO2 = raw async demodulated bits
 - SUMP capture engine samples GDO0/GDO2 at configurable rate
 - Host commands via USB Serial/JTAG (or UART0) control capture
 
-**Use Case**: RF signal sniffing, protocol reverse engineering, signal analysis without packet decoding overhead.
+**Use Case**: RF signal sniffing, protocol reverse engineering, signal analysis with capture + packet RX in one firmware.
 
 ---
 
@@ -22,36 +23,39 @@ The default firmware (`main.c`) implements an **async RX capture** mode:
 cc1101_config_t rx_cfg = CC1101_DEFAULT_CONFIG();
 rx_cfg.freq_hz = 433920000;           // 433.92 MHz
 rx_cfg.modem.modulation    = CC1101_MOD_2FSK_E;
-rx_cfg.modem.sync_mode     = CC1101_SYNC_NONE_E;    // No sync word
-rx_cfg.modem.preamble_bytes = 0;
+rx_cfg.modem.sync_mode     = CC1101_SYNC_16_16_E; // 16-bit sync word
+rx_cfg.modem.preamble_bytes = 4;
 rx_cfg.modem.datarate_bps  = 2400;                    // 2400 baud
-rx_cfg.modem.deviation     = 0x27;  // ~11.9 kHz deviation
+rx_cfg.modem.deviation     = 0x47;  // ~47.6 kHz, matches the TX signal
 rx_cfg.modem.chanbw        = 0x0C;  // ~203 kHz channel BW
-rx_cfg.packet.mode         = CC1101_PKT_INFINITE_E;  // Infinite length
+rx_cfg.packet.mode         = CC1101_PKT_FIXED_E;  // fixed-length frames
 rx_cfg.packet.crc_enable   = false;
 rx_cfg.packet.whitening    = false;
 rx_cfg.packet.append_status = false;
-rx_cfg.packet.max_length   = 0;
-rx_cfg.packet.sync1        = 0xDE;   // Unused (sync=none)
+rx_cfg.packet.max_length   = 4;
+rx_cfg.packet.sync1        = 0xDE;
 rx_cfg.packet.sync0        = 0xAF;
-rx_cfg.radio.gdo0_mode     = CC1101_GDO_ASYNC_DATA;  // 0x0D
-rx_cfg.radio.gdo2_mode     = CONFIG_SUMP_GDO2_MODE;  // 0x0D default
+rx_cfg.radio.gdo0_mode     = CC1101_GDO_SYNC_WORD;  // 0x06, sync strobe
+rx_cfg.radio.gdo2_mode     = CC1101_GDO_ASYNC_DATA; // 0x0D, raw demod bits
 rx_cfg.radio.autocal       = CC1101_AUTOCAL_ALWAYS;
 rx_cfg.radio.pin_mode      = 0x3F;
 rx_cfg.radio.pin_output    = true;
 ```
 
+> After `cc1101_configure()` the firmware restores two known-good packet
+> registers: `PKTCTRL1 = 0x04` and `MCSM1 = 0x3F`.
+
 **Key Settings**:
 | Parameter | Value | Reason |
 |-----------|-------|--------|
 | Modulation | 2FSK | Common for simple remotes/sensors |
-| Sync Mode | None | Transparent bit stream |
+| Sync Mode | 16/16 (0xDEAF) | Packet framing for the RX loop |
 | Datarate | 2400 bps | Typical for 433 MHz OOK/2FSK remotes |
-| Deviation | 0x27 (~12 kHz) | Matches HackRF 12 kHz deviation |
+| Deviation | 0x47 (~47.6 kHz) | Matches the TX signal (gen_2fsk.py, 50 kHz) |
 | Channel BW | 0x0C (~203 kHz) | Wide enough for deviation |
-| Packet Mode | Infinite | No packet boundaries |
-| GDO0 Mode | Async Data (0x0D) | Raw demodulated bits |
-| GDO2 Mode | Async Data (0x0D) | Same on 2nd channel |
+| Packet Mode | Fixed, 4 bytes | Test frames |
+| GDO0 Mode | Sync Word (0x06) | Sync strobe; anchors packet windows |
+| GDO2 Mode | Async Data (0x0D) | Raw demodulated bitstream (captured) |
 
 ---
 
@@ -72,7 +76,7 @@ void app_main(void)
              cc1101_read_status_reg(&s_radio, CC1101_PARTNUM),
              cc1101_read_status_reg(&s_radio, CC1101_VERSION));
 
-    // 4. Configure radio for async RX
+    // 4. Configure radio for 2FSK packet RX + async GDO2
     if (cc1101_configure(&s_radio, &rx_cfg) != ESP_OK) { fail(); }
     cc1101_set_rx_mode(&s_radio);
 
@@ -137,7 +141,9 @@ python scripts/sump_stream_capture.py
 | 9600 baud GFSK | 10x | 96,000 Hz | Higher rate signals |
 | Unknown | 50x | 120,000 Hz | Oversample for unknown baud |
 
-**Max**: 500 kHz (limited by ISR)
+**Max**: 250 kHz sustained (the 160 MHz capture ISR trips the interrupt watchdog
+for alarm < 4 µs); the firmware clamps stream rates to 500 kHz but that only
+works for short bursts.
 
 ---
 
@@ -210,23 +216,27 @@ rx_cfg.radio.gdo2_mode = CC1101_GDO_HIGH_Z;  // 0x2E
 
 ```yaml
 main_capture:
-  name: "Async RX Capture"
+  name: "2FSK Packet RX + Capture"
   source: "main/main.c"
   config:
     freq_hz: 433920000
     modulation: "2FSK"
-    sync_mode: "NONE"
+    sync_mode: "16/16"
+    sync_bytes: "DEAF"
+    preamble_bytes: 4
     datarate_bps: 2400
-    deviation_reg: 0x27
+    deviation_reg: 0x47  # ~47.6 kHz, matches TX
     chanbw_reg: 0x0C
-    packet_mode: "INFINITE"
+    packet_mode: "FIXED"
+    max_length: 4
     crc: false
     whitening: false
     append_status: false
-    gdo0_mode: 0x0D  # ASYNC_DATA
-    gdo2_mode: "CONFIG_SUMP_GDO2_MODE (default 0x0D)"
+    gdo0_mode: 0x06  # SYNC_WORD strobe
+    gdo2_mode: "CONFIG_SUMP_GDO2_MODE (default 0x0D ASYNC_DATA)"
     autocal: "ALWAYS"
     pin_mode: 0x3F
+    patched_after_configure: ["PKTCTRL1=0x04", "MCSM1=0x3F"]
   status_monitor_period_ms: 500
   capture_gpio:
     gdo0: "PIN_NUM_GDO0 (default 3)"

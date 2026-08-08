@@ -35,9 +35,12 @@ partition_table/
 capture_*.bin
 logs/
 *.log
+signals/
 
 # =========================
 # Editor / Terminal Workflows
+# Agent tooling
+.omo/
 # =========================
 # Vim / Neovim
 *.swp

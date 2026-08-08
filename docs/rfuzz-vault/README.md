@@ -7,7 +7,7 @@
 ## 📚 Vault Structure
 
 ```
-docs/obsidian/
+docs/rfuzz-vault/
 ├── 00-overview/
 │   └── index.md                 # Project overview, goals, quick start
 ├── 01-hardware/
@@ -57,8 +57,8 @@ The ESP32-S3 exposes **two independent USB interfaces**. Connect **both** cables
 
 | Port | Interface | Purpose | Used by |
 |------|-----------|---------|---------|
-| **COM6** | CH343 UART bridge (UART0, GPIO 43/44) | ESP-IDF console, flashing, programming | `idf.py flash monitor`, `idf.py -p COM6 test`, esptool, `rssi_mon.py`, TX/RX test control |
-| **COM7** | Native USB Serial/JTAG (GPIO 19/20) | SUMP/OLS data dump | `capture_sump.py`, `capture.py`, PulseView / GTKWave |
+| **COM6** | CH343 UART bridge (UART0, GPIO 43/44) | ESP-IDF console, flashing, programming | `idf.py flash monitor`, `idf.py -p COM6 test`, esptool |
+| **COM7** | Native USB Serial/JTAG (GPIO 19/20) | SUMP/OLS data dump | `capture_custom.py`, `sniff.py`, PulseView / GTKWave |
 
 > ⚠️ The two ports are **separate devices** — capturing on COM7 never touches the UART console on COM6 and vice versa. If a script or `esptool` reports "port busy / not found", make sure **both** cables are plugged in and re-check the numbers in Device Manager. COM numbers are machine-dependent (see `01-hardware/board-support.md`); list them with:
 > ```powershell
@@ -123,13 +123,14 @@ Host and VM must be on the same LAN. Reference topology: host `192.168.1.136`, D
 | Task | Command |
 |------|---------|
 | **Build & Flash Default (Async RX)** | `idf.py build flash monitor` |
-| **Build 2FSK Beacon TX** | `cp examples/rfuzz_tx_2fsk.c main/main.c && idf.py build flash monitor` |
-| **Build Packet RX** | `cp main/RFuzz_RX.c main/main.c && idf.py build flash monitor` |
-| **Capture (Simple)** | `python scripts/capture.py --port COM7 --rate 24000 --samples 100000` |
-| **Capture (PulseView)** | `python scripts/capture_sump.py --port COM7 --rate 24000 --samples 100000 --format sr` |
-| **Capture (GTKWave)** | `python scripts/capture_sump.py --port COM7 --rate 100000 --format vcd` |
-| **TX Verify** | `python scripts/tx_verify.py` |
-| **RSSI Monitor** | `python scripts/rssi_mon.py 30 rssi_log.txt` |
+| **Build 2FSK Beacon TX** | `idf.py build -DSUMP_APP=RFuzz_TX flash monitor` |
+| **Build Packet RX** | `idf.py build -DSUMP_APP=RFuzz_RX flash monitor` |
+| **Build TX Example** | `cp examples/rfuzz_tx_2fsk.c main/main.c && idf.py build flash monitor` |
+| **Capture (raw + .sr + .vcd)** | `python scripts/capture_custom.py -p COM7 -r 24000 -n 100000` |
+| **Capture @ 100 kHz (GTKWave)** | `python scripts/capture_custom.py -p COM7 -r 100000 -n 100000` (open the `.vcd`) |
+| **Live Stream + Decode** | `python scripts/sniff.py stream --port COM7 --rate 250000 --seconds 5` |
+| **Receive + Decode** | `python scripts/sniff.py receive --port COM7 --rate 250000 --samples 262144` |
+| **Analyze a saved capture** | `python scripts/sniff.py analyze sniff_capture.sr --probe gdo2` |
 | **Dragon OS SSH** | `ssh dragon@192.168.1.101` |
 | **HackRF RX** | `ssh dragon 'hackrf_transfer -r cap.c8 -f 433920000 -s 2000000 -n 4000000'` |
 | **HackRF Sweep** | `ssh dragon 'hackrf_sweep -f 430:440 -w 100000 -1' > sweep.csv` |
@@ -141,7 +142,7 @@ Host and VM must be on the same LAN. Reference topology: host `192.168.1.136`, D
 | Concept | Description |
 |---------|-------------|
 | **Async RX** | Transparent demodulation: no sync, no packet layer, raw bits on GDO0 |
-| **SUMP Capture** | On-chip logic analyzer sampling GDO0/GDO2 at up to 500 kS/s |
+| **SUMP Capture** | On-chip logic analyzer sampling GDO0/GDO2 at up to 250 kS/s |
 | **USB Transport** | USB Serial/JTAG for SUMP (COM7), UART0 for console (COM6) — no DTR reset |
 | **Dragon OS** | Ubuntu-based SDR distro on HackRF One at `dragon@192.168.1.101` |
 | **Coordinated Workflows** | ESP32 narrowband + HackRF wideband for validation, replay, fuzzing |
@@ -200,7 +201,7 @@ Host and VM must be on the same LAN. Reference topology: host `192.168.1.136`, D
 
 ## 📝 Contributing to Docs
 
-1. Edit `.md` files in `docs/obsidian/`
+1. Edit `.md` files in `docs/rfuzz-vault/`
 2. Follow existing structure and formatting
 3. Update this index if adding new pages
 4. Keep AI-readable YAML blocks at end of each file

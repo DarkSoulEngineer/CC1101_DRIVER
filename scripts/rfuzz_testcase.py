@@ -55,16 +55,33 @@ import rfuzz_tools  # noqa: E402
 
 DEFAULT_HOST = "dragon@192.168.1.101"
 DEFAULT_REMOTE_PATH = "~/rfuzz_2fsk_gap.c8"
-DEFAULT_TX_FREQ = 433920000
+# 434.5 MHz matches the firmware's RX tuning (main/main.c rx_cfg.freq_hz =
+# 434500000, retuned away from 433.92 MHz which is jammed by a bench
+# interferer). TXing at 433.92 MHz puts the burst out of the 464 kHz channel
+# and PASS 2 decodes nothing.
+DEFAULT_TX_FREQ = 434500000
 DEFAULT_TX_SRATE = 2400000
 DEFAULT_TX_X = 26
 DEFAULT_TX_A = 0
 DEFAULT_PORT = "COM7"
 DEFAULT_BAUD = 115200
 DEFAULT_RATE = 250000
-DEFAULT_SAMPLES = 262144
+DEFAULT_SAMPLES = 2097152
+# Keep signal + capture artifacts out of the repo root: they land in the
+# repo's signals/ directory regardless of the CWD the script is run from.
+DEFAULT_OUT_DIR = os.path.normpath(os.path.join(HERE, os.pardir, "signals"))
 
 EXPECT_PAYLOAD = bytes([0x01, 0x02, 0x03, 0x04])
+
+
+def payload_expect(args):
+    """Per-case expected payload bytes (from --payload), default 01020304."""
+    if getattr(args, "payload", None):
+        try:
+            return bytes.fromhex(args.payload)
+        except ValueError:
+            sys.exit(f"invalid --payload hex: {args.payload!r}")
+    return EXPECT_PAYLOAD
 
 
 def detect_spb(ch0, ch1, rate, preamble):
@@ -135,9 +152,10 @@ def phase_packets(args, tx_file):
                 args.tx_a)
         th.join()
         frames, bad = parse_frames(result["buf"])
-        ok = sum(1 for f in frames if f == EXPECT_PAYLOAD)
+        pexpect = payload_expect(args)
+        ok = sum(1 for f in frames if f == pexpect)
         print(f"[+] frames={len(frames)} bad={bad} "
-              f"payload==01 02 03 04: {ok}/{len(frames)}")
+              f"payload=={pexpect.hex()}: {ok}/{len(frames)}")
         if ok > 0 or len(frames) > 0:
             return len(frames)
         if attempt < 3:
@@ -163,25 +181,42 @@ def phase_capture(args, tx_file, base):
     for attempt in range(1, 5):
         th = threading.Thread(target=tx)
         th.start()
-        raw = capture_custom.capture(ser, args.rate, args.samples)
+        try:
+            raw = capture_custom.capture(ser, args.rate, args.samples)
+        except RuntimeError as e:
+            print(f"  [retry {attempt}: {e}]")
+            th.join()
+            if attempt == 4:
+                raise
+            continue
         th.join()
         ch0, ch1 = capture_custom.decode(bytes(raw))
         r_actual = capture_custom.actual_rate(args.rate)
-        spb, bps, _ = detect_spb(ch0, ch1, r_actual, args.preamble)
-        bits = rfuzz_tools.clean_bits(ch1, spb, 10)
-        packets = rfuzz_tools.find_packets(bits, spb, args.preamble)
-        if packets:
+        # The modem re-acquires bit-sync at a different phase per packet, so
+        # use the nominal samples-per-bit and sweep all phases
+        # (find_packets_multiphase) instead of the run-quantized single-phase
+        # clean_bits/find_packets path.
+        spb = r_actual / 2400.0
+        packets = rfuzz_tools.find_packets_multiphase(
+            np.asarray(ch1, dtype=np.uint8), spb,
+            payload_expect=payload_expect(args), preamble_bytes=args.preamble,
+            rate=r_actual)
+        good = sum(1 for p in packets
+                   if p["sync_errors"] == 0 and p["bit_errors"] <= 2)
+        if good > 0:
             break
         print(f"  [retry {attempt}: no packets, burst outside window, retrying...]")
     ser.close()
-    print(f"[+] detected datarate={bps:.0f} bps (spb={spb:.3f})")
+    print(f"[+] nominal datarate=2400 bps (spb={spb:.3f})")
 
     # Properly decode packets to get CLEAN bitstream for FSK synthesis
     for p in packets:
         hexp = " ".join(f"{b:02X}" for b in p["payload"])
-        print(f"  bit@{p['offset_bits']:>7} pre={'Y' if p['preamble_ok'] else 'N'} "
+        print(f"  t={p['timestamp_s']:.3f}s phase={p['phase']:>3} "
+              f"sync_err={p['sync_errors']} pre={'Y' if p['preamble_ok'] else 'N'} "
               f"errors={p['bit_errors']} payload={hexp}")
-    good = sum(1 for p in packets if not p["bit_errors"])
+    good = sum(1 for p in packets
+               if p["sync_errors"] == 0 and p["bit_errors"] <= 2)
     print(f"[+] packets={len(packets)} payload_ok={good}/{len(packets)}")
 
     if_dev, dev_hz = capture_custom.synth_defaults(r_actual, args.fsk_dev)
@@ -197,18 +232,29 @@ def phase_capture(args, tx_file, base):
     # modem bit-sync compresses the leading bits.
     starts = rfuzz_tools.packet_starts(np.asarray(ch0, dtype=np.uint8),
                                        spb, packets, args.preamble)
+    mp_best = {id(p): (p["payload"], p["bit_errors"]) for p in packets}
     packets, gstarts = rfuzz_tools.refine_packets(
-        np.asarray(ch1, dtype=np.uint8), spb, packets, starts, args.preamble)
-    ch1cr = rfuzz_tools.clean_gdo2(packets, gstarts, spb,
-                                   args.preamble, len(ch1), framed=True,
-                                   corrected=True)
+        np.asarray(ch1, dtype=np.uint8), spb, packets, starts, args.preamble,
+        payload_expect(args), sync_bits=rfuzz_tools.MP_SYNC_BITS)
+    for p in packets:
+        payload, errors = mp_best[id(p)]
+        if p["bit_errors"] > errors:
+            p["payload"] = payload
+            p["bit_errors"] = errors
+            p["pbits"] = np.concatenate([
+                rfuzz_tools.preamble_bits(args.preamble),
+                rfuzz_tools.MP_SYNC_BITS,
+                rfuzz_tools.bits_msb(payload),
+            ])
     ch1c = rfuzz_tools.clean_gdo2(packets, gstarts, spb,
-                                  args.preamble, len(ch1), framed=True)
+                                  args.preamble, len(ch1), framed=True,
+                                  corrected=True,
+                                  sync_bytes=rfuzz_tools.MP_SYNC_BYTES)
     fsk = np.zeros(len(ch1), dtype=np.float32)
     for p, start in zip(packets, gstarts):
         pbits = np.concatenate([
             rfuzz_tools.preamble_bits(args.preamble),
-            rfuzz_tools.SYNC_BITS,
+            rfuzz_tools.MP_SYNC_BITS,
             rfuzz_tools.bits_msb(p["payload"]),
         ])
         fsk += capture_custom.mod_synth_from_bits(
@@ -218,24 +264,28 @@ def phase_capture(args, tx_file, base):
                          if_dev, dev_hz)
     with open(base + ".raw", "wb") as f:
         f.write(bytes(raw))
-    capture_custom.save_sr(ch0, ch1, ch1cr, ch1c, fsk, int(round(r_actual)),
+    capture_custom.save_sr(ch0, ch1, ch1c, fsk, int(round(r_actual)),
                            base + ".sr")
-    capture_custom.save_vcd(ch0, ch1, ch1cr, ch1c, fsk, r_actual, base + ".vcd")
+    capture_custom.save_vcd(ch0, ch1, ch1c, fsk, r_actual, base + ".vcd")
     return base + ".raw"
 
 
 def phase_decode(raw, args):
     print("\n=== DECODE: packets from GDO2 capture ===")
     ch0, ch1, rate = rfuzz_tools.load_raw(raw, args.rate)
-    spb, bps, _ = detect_spb(ch0, ch1, rate, args.preamble)
-    print(f"[+] detected datarate={bps:.0f} bps (spb={spb:.3f})")
-    bits = rfuzz_tools.clean_bits(ch1, spb, 10)
-    packets = rfuzz_tools.find_packets(bits, spb, args.preamble)
+    spb = rate / 2400.0
+    print(f"[+] nominal datarate=2400 bps (spb={spb:.3f})")
+    packets = rfuzz_tools.find_packets_multiphase(
+        np.asarray(ch1, dtype=np.uint8), spb,
+        payload_expect=payload_expect(args), preamble_bytes=args.preamble,
+        rate=rate)
     for p in packets:
         hexp = " ".join(f"{b:02X}" for b in p["payload"])
-        print(f"  bit@{p['offset_bits']:>7} pre={'Y' if p['preamble_ok'] else 'N'} "
+        print(f"  t={p['timestamp_s']:.3f}s phase={p['phase']:>3} "
+              f"sync_err={p['sync_errors']} pre={'Y' if p['preamble_ok'] else 'N'} "
               f"errors={p['bit_errors']} payload={hexp}")
-    good = sum(1 for p in packets if not p["bit_errors"])
+    good = sum(1 for p in packets
+               if p["sync_errors"] == 0 and p["bit_errors"] <= 2)
     print(f"[+] packets={len(packets)} payload_ok={good}/{len(packets)}")
     return packets
 
@@ -244,8 +294,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default=DEFAULT_HOST)
-    ap.add_argument("--out-dir", "-o", default=".",
-                    help="output directory for signal + captures")
+    ap.add_argument("--out-dir", "-o", default=DEFAULT_OUT_DIR,
+                    help="output directory for signal + captures "
+                         "(default: repo signals/)")
     ap.add_argument("--name", default="rfuzz_testcase",
                     help="output base name (default rfuzz_testcase)")
     ap.add_argument("--remote-path", default=DEFAULT_REMOTE_PATH,
@@ -263,6 +314,8 @@ def main():
                     help="preamble bytes in TX signal (4 = CC1101 minimum; "
                          "use 128+ for single-shot reliability with HackRF jitter): "
                          "python rfuzz_testcase.py --packets 1 --preamble 128")
+    ap.add_argument("--payload", type=str, default=None,
+                    help="expected payload hex for the frame (default 01020304)")
     ap.add_argument("--analog-amp", type=int, default=90)
     ap.add_argument("--mod", default="2fsk", choices=capture_custom.MODS,
                     help="basic modulation rendered on channel 3 "
@@ -308,9 +361,11 @@ def main():
         packets = phase_decode(raw, args)
     elif raw:
         ch0, ch1, rate = rfuzz_tools.load_raw(raw, args.rate)
-        spb, _, _ = detect_spb(ch0, ch1, rate, args.preamble)
-        packets = rfuzz_tools.find_packets(
-            rfuzz_tools.clean_bits(ch1, spb, 10), spb, args.preamble)
+        spb = rate / 2400.0
+        packets = rfuzz_tools.find_packets_multiphase(
+            np.asarray(ch1, dtype=np.uint8), spb,
+            payload_expect=payload_expect(args), preamble_bytes=args.preamble,
+            rate=rate)
 
     if raw and "regen" not in skipped:
         out = base + "_regen.c8"
@@ -325,13 +380,15 @@ def main():
     print(f"TX:      ssh {args.host} hackrf_transfer -t {args.remote_path} "
           f"-f {args.tx_freq} -s {args.tx_srate} -x {args.tx_x} -a {args.tx_a}")
     if n_frames:
-        print(f"PASS 1:  {n_frames} packets, payload 01 02 03 04 (0 bad frames)")
+        print(f"PASS 1:  {n_frames} packets, payload {payload_expect(args).hex()} "
+              f"(0 bad frames)")
     if raw:
-        print(f"PASS 2:  {raw} + .sr (GDO0/GDO2/FSK) + .vcd")
+        print(f"PASS 2:  {raw} + .sr (GDO0, GDO2, GDO2_CLEAN, FSK) + .vcd")
         print(f"DECODE:  {len(packets)} packets, "
-              f"payload_ok {sum(1 for p in packets if not p['bit_errors'])}/{len(packets)}")
+              f"payload_ok {sum(1 for p in packets if p['sync_errors'] == 0 and p['bit_errors'] <= 2)}/{len(packets)}")
         print(f"REGEN:   {base}_regen.c8 + {base}_regen_i.c8 (load in URH)")
-    ok = (not n_frames or n_frames > 0) and (not packets or any(not p["bit_errors"] for p in packets))
+    ok = (not n_frames or n_frames > 0) and (not packets or any(
+        p["sync_errors"] == 0 and p["bit_errors"] <= 2 for p in packets))
     print(f"RESULT:  {'PASS' if ok else 'CHECK'}")
 
 

@@ -309,11 +309,8 @@ config SUMP_GDO2_MODE
     int "GDO2 output mode (IOCFG2 register value)"
     default 13  # 0x0D = Async Data
     range 0 47
-
-config SUMP_GDO2_PIN
-    int "GDO2 GPIO pin"
-    default 4
-    range 0 48
+    # The GDO2 GPIO pin is NOT a SUMP option: capture_init() receives
+    # PIN_NUM_GDO2 from CONFIG_CC1101_PIN_GDO2 (hw_init.h).
 ```
 
 ### DTR Reset Guard (UART Mode)
@@ -395,7 +392,6 @@ CONFIG_SUMP_TRANSPORT_USB=y
 CONFIG_SUMP_MAX_SAMPLES=100000
 CONFIG_SUMP_NUM_CHANNELS=2
 CONFIG_SUMP_GDO2_MODE=13
-CONFIG_SUMP_GDO2_PIN=4
 ```
 
 ### Preset 2: 2FSK Beacon TX (rfuzz_tx_2fsk.c)

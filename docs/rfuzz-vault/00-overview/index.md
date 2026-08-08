@@ -48,7 +48,7 @@ CC1101_DRIVER/
 
 ### Firmware (ESP32-S3)
 - **CC1101 Driver**: Full register map, burst SPI, GDO0 ISR, async RX mode
-- **SUMP Capture**: 2-channel logic analyzer (GDO0/GDO2), timer ISR sampling up to 500 kHz
+- **SUMP Capture**: 2-channel logic analyzer (GDO0/GDO2), timer ISR sampling up to 250 kHz sustained
 - **Transport**: USB Serial/JTAG (recommended) or UART0 for OLS protocol
 - **Commands**: `0x01` capture, `0x02` TX trigger, `0x03` stream, `0x04` stop, `0x05` freq sweep
 

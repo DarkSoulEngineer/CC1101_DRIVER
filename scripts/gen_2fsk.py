@@ -38,7 +38,7 @@ BPS = 2400.0
 DEV = 50000.0
 AMP = 90
 SPS = int(FS / BPS)
-SYNC = bytes([222, 175])
+SYNC = bytes([0xBE, 0xEF])
 DEFAULT_PAYLOAD = bytes([1, 2, 3, 4])
 DEFAULT_PREAMBLE = 4
 
@@ -61,9 +61,10 @@ def _random_payload(length, seed):
 
 
 def generate(out_path, repeat=100, gap_ms=0.0, fs=FS, dev=DEV, amp=AMP,
-              preamble_bytes=DEFAULT_PREAMBLE, payload=DEFAULT_PAYLOAD):
+              preamble_bytes=DEFAULT_PREAMBLE, payload=DEFAULT_PAYLOAD,
+              baud=BPS):
     bits = packet_bits(preamble_bytes, payload)
-    sps = int(fs / BPS)
+    sps = int(fs / baud)
     gap_samples = int(gap_ms * fs / 1000.0)
     total = len(bits) * repeat * sps + gap_samples * repeat
     iq = np.zeros(total, dtype=np.complex64)
@@ -84,7 +85,8 @@ def generate(out_path, repeat=100, gap_ms=0.0, fs=FS, dev=DEV, amp=AMP,
     dur = total / fs
     print(f'wrote {out_path}: {iq8.shape[0]} samples, {dur:.2f} s, '
           f'{iq8.nbytes / 1000000.0:.1f} MB ({repeat} packets, '
-          f'preamble={preamble_bytes} payload={payload.hex()} gap {gap_ms} ms)',
+          f'baud={baud:.0f} dev={dev:.0f} preamble={preamble_bytes} '
+          f'payload={payload.hex()} gap {gap_ms} ms)',
           file=sys.stderr)
     return iq8.shape[0], bits
 
@@ -99,6 +101,10 @@ def _parse_args(argv):
                     help='idle silence between packets in ms (default 0)')
     ap.add_argument('--preamble', '-p', type=int, default=DEFAULT_PREAMBLE,
                     help='preamble bytes (default 4; >=8 for single-shot bursts)')
+    ap.add_argument('--baud', type=float, default=BPS,
+                    help='symbol rate in bps (default 2400)')
+    ap.add_argument('--dev', type=float, default=DEV,
+                    help='FSK deviation in Hz (default 50000)')
     g = ap.add_mutually_exclusive_group()
     g.add_argument('--payload', type=str, default=None,
                    help='payload bytes as hex (default 01020304)')
@@ -139,7 +145,8 @@ def main(argv=None):
     print(f'samples/symbol={SPS}, bits/packet={len(packet_bits(args.preamble, payload))}',
           file=sys.stderr)
     generate(args.out, args.repeat, args.gap_ms,
-             preamble_bytes=args.preamble, payload=payload)
+             preamble_bytes=args.preamble, payload=payload, baud=args.baud,
+             dev=args.dev)
 
 
 if __name__ == '__main__':

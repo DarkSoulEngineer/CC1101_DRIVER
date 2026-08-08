@@ -87,7 +87,9 @@ static IRAM_ATTR bool timer_isr_cb(gptimer_handle_t timer,
 - Runs in **IRAM** (`IRAM_ATTR`) for deterministic timing
 - 1 sample = 1 byte: `bit0=GDO0`, `bit1=GDO2`
 - Timer resolution: 1 MHz → alarm = `1,000,000 / sample_rate_hz` ticks
-- Max sample rate: **500 kHz** (limited by ISR overhead)
+- Max sustained sample rate: **250 kHz** (alarm < 4 µs trips the interrupt
+  watchdog on the 160 MHz build; the firmware clamps stream requests to
+  500 kHz, which only survives for short bursts)
 
 > **⚠ Actual rate vs requested**: `alarm_count` uses integer division. The real sample rate is
 > `1,000,000 / (1,000,000 / rate)` (integer). E.g. requesting `48000` yields alarm=20 µs →
@@ -222,9 +224,13 @@ bits 2-7: Reserved (0)
 | `CONFIG_SUMP_MAX_SAMPLES` | 100000 | Capture buffer size (bytes) |
 | `CONFIG_SUMP_NUM_CHANNELS` | 2 | 1 or 2 channels |
 | `CONFIG_SUMP_GDO2_MODE` | 13 (0x0D) | IOCFG2 value for GDO2 |
-| `CONFIG_SUMP_GDO2_PIN` | 4 | GDO2 GPIO |
 | `CONFIG_SUMP_DTR_RESET_GUARD` | y | Drain UART buffer on boot |
 | `CONFIG_SUMP_DTR_GUARD_MS` | 3000 | Drain duration |
+
+> The GDO2 **pin** is not a SUMP option — `capture_init()` receives
+> `PIN_NUM_GDO2`, which is `CONFIG_CC1101_PIN_GDO2` from `hw_init.h`
+> (the cc1101 Kconfig). A former `CONFIG_SUMP_GDO2_PIN` was removed:
+> it duplicated the cc1101 pin and nothing ever read it.
 
 ---
 
@@ -264,7 +270,7 @@ See [[04-host-scripts/capture_sump.py|SUMP Capture Script]] for details.
 
 | Parameter | Limit | Notes |
 |-----------|-------|-------|
-| Max Sample Rate | 500 kHz | ISR overhead, GPIO read latency |
+| Max Sample Rate (sustained) | 250 kHz | ISR overhead, GPIO read latency; alarm < 4 µs trips the watchdog |
 | Max Capture Buffer | 4M samples | `CONFIG_SUMP_MAX_SAMPLES`, PSRAM if >~300k |
 | Stream Buffer | 2 KB | `CAPTURE_STREAM_BUF_SIZE`, ring buffer |
 | USB Write Chunk | 1 KB | `transport_write()` chunk size |

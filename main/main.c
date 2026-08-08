@@ -57,22 +57,24 @@ void app_main(void)
              cc1101_read_status_reg(&s_radio, CC1101_PARTNUM),
              cc1101_read_status_reg(&s_radio, CC1101_VERSION));
 
-    /* Packet RX with sync word 0xDEAF: demodulated bits after sync on GDO2. */
+    /* Packet RX with sync word 0xBEEF: demodulated bits after sync on GDO2.
+   SYNC DODGE: 0xDEAF was hit ~100x/s by a periodic bench interference pattern
+   (constant payload 0xCFFFDFFE), flooding the FIFO and drowning our test signal. */
     cc1101_config_t rx_cfg = CC1101_DEFAULT_CONFIG();
-    rx_cfg.freq_hz = 433920000;
+    rx_cfg.freq_hz = 434500000;  /* RETUNE: 433.92 MHz was jammed by a bursty 2FSK interferer (~100 phantom frames/s); 434.5 MHz is a clean test channel */
     rx_cfg.modem.modulation    = CC1101_MOD_2FSK_E;
     rx_cfg.modem.sync_mode     = CC1101_SYNC_16_16_E;
     rx_cfg.modem.preamble_bytes = 4;
     rx_cfg.modem.datarate_bps  = 2400;
-    rx_cfg.modem.deviation     = 0x27;
-    rx_cfg.modem.chanbw        = 0x0C;
+    rx_cfg.modem.deviation     = 0x47;  /* ~47.6 kHz, matches the TX signal */
+    rx_cfg.modem.chanbw        = CC1101_CHANBW_464_KHZ;
     rx_cfg.packet.mode         = CC1101_PKT_FIXED_E;
     rx_cfg.packet.crc_enable   = false;
     rx_cfg.packet.whitening    = false;
     rx_cfg.packet.append_status = false;
     rx_cfg.packet.max_length   = 4;
-    rx_cfg.packet.sync1        = 0xDE;
-    rx_cfg.packet.sync0        = 0xAF;
+    rx_cfg.packet.sync1        = 0xBE;
+    rx_cfg.packet.sync0        = 0xEF;
     rx_cfg.radio.gdo0_mode     = CC1101_GDO_SYNC_WORD;
     rx_cfg.radio.gdo2_mode     = CC1101_GDO_ASYNC_DATA;
     rx_cfg.radio.autocal       = CC1101_AUTOCAL_ALWAYS;
@@ -83,11 +85,7 @@ void app_main(void)
         ESP_LOGE(TAG, "CC1101 configure failed");
         while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
     }
-    
-    /* Restore working register values from known-good packet mode */
-    cc1101_write_reg(&s_radio, CC1101_PKTCTRL1, 0x04);
-    cc1101_write_reg(&s_radio, CC1101_MCSM1, 0x3F);
-    
+
     cc1101_set_rx_mode(&s_radio);
 
     cc1101_log_registers(&s_radio);

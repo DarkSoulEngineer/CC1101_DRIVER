@@ -109,7 +109,8 @@ uint8_t cc1101_read_reg(cc1101_handle_t *dev, uint8_t reg)
 
 static uint8_t cc1101_read_status(cc1101_handle_t *dev, uint8_t reg)
 {
-    uint8_t tx_data[2] = { reg | CC1101_READ_BURST, 0x00 };
+    /* Status registers are single-read (0x80) per the CC1101 datasheet. */
+    uint8_t tx_data[2] = { reg | CC1101_READ_SINGLE, 0x00 };
     uint8_t rx_data[2] = { 0x00, 0x00 };
 
     xSemaphoreTake(dev->spi_mutex, portMAX_DELAY);
@@ -322,9 +323,9 @@ esp_err_t cc1101_configure(cc1101_handle_t *dev,
     uint8_t drate_e = 0, drate_m = 0;
     calc_datarate(cfg->modem.datarate_bps, &drate_e, &drate_m);
 
-    uint8_t mdmcfg4 = CC1101_MDMCFG4_VALUE(cfg->modem.chanbw >> 6,
-                                             (cfg->modem.chanbw >> 4) & 0x3,
-                                             drate_e);
+    /* chanbw is the packed MDMCFG4 high nibble (CC1101_CHANBW_*_KHZ);
+     * only the datarate exponent is OR'd into the low nibble. */
+    uint8_t mdmcfg4 = (cfg->modem.chanbw & 0xF0) | (drate_e & 0x0F);
     cc1101_write_reg(dev, CC1101_MDMCFG4, mdmcfg4);
     cc1101_write_reg(dev, CC1101_MDMCFG3, drate_m);
     cc1101_write_reg(dev, CC1101_MDMCFG2,
@@ -392,8 +393,8 @@ void cc1101_config(cc1101_handle_t *dev)
     cc1101_write_reg(dev, CC1101_IOCFG2, CC1101_GDO_ASYNC_DATA);
     cc1101_write_reg(dev, CC1101_IOCFG0, CC1101_GDO_ASYNC_DATA);
     cc1101_write_reg(dev, CC1101_PKTLEN, 255);
-    cc1101_write_reg(dev, CC1101_PKTCTRL1, CC1101_APPEND_STATUS | CC1101_ADR_CHK_NONE);
-    cc1101_write_reg(dev, CC1101_PKTCTRL0, CC1101_PKT_FORMAT_ASYNC | CC1101_CRC_ENABLE | CC1101_PKTLEN_VARIABLE);
+    cc1101_write_reg(dev, CC1101_PKTCTRL1, CC1101_ADR_CHK_NONE);
+    cc1101_write_reg(dev, CC1101_PKTCTRL0, CC1101_PKT_FORMAT_ASYNC | CC1101_PKTLEN_VARIABLE);
     cc1101_set_frequency(dev, 433920000);
     cc1101_write_reg(dev, CC1101_MDMCFG4, CC1101_MDMCFG4_VALUE(3, 0, 10));
     cc1101_write_reg(dev, CC1101_MDMCFG3, CC1101_MDMCFG3_VALUE(131));
@@ -657,9 +658,8 @@ void cc1101_verify_config(cc1101_handle_t *dev, const cc1101_config_t *cfg)
 
     uint8_t drate_e = 0, drate_m = 0;
     calc_datarate(cfg->modem.datarate_bps, &drate_e, &drate_m);
-uint8_t exp_mdmcfg4 = CC1101_MDMCFG4_VALUE(cfg->modem.chanbw >> 6,
-                                                  (cfg->modem.chanbw >> 4) & 0x3,
-                                                  drate_e);
+    /* chanbw is the packed MDMCFG4 high nibble (CC1101_CHANBW_*_KHZ) */
+    uint8_t exp_mdmcfg4 = (cfg->modem.chanbw & 0xF0) | (drate_e & 0x0F);
     uint8_t exp_mdmcfg2 = CC1101_MDMCFG2_VALUE(cfg->modem.dc_filter_off ? 1 : 0,
                                                 cfg->modem.modulation,
                                                 cfg->modem.manchester ? 1 : 0,
@@ -781,7 +781,7 @@ esp_err_t cc1101_tx_test(cc1101_handle_t *dev)
     tx.modem.sync_mode     = CC1101_SYNC_16_16_E;
     tx.modem.preamble_bytes = 4;
     tx.modem.deviation     = deviation;
-    tx.modem.chanbw        = 0x03;
+    tx.modem.chanbw        = CC1101_CHANBW_464_KHZ;
     tx.packet.mode         = CC1101_PKT_FIXED_E;
     tx.packet.max_length   = 1;
     tx.packet.crc_enable   = false;
@@ -832,7 +832,7 @@ esp_err_t cc1101_tx_test_preserve_rx(cc1101_handle_t *dev)
     tx.modem.sync_mode     = CC1101_SYNC_16_16_E;
     tx.modem.preamble_bytes = 4;
     tx.modem.deviation     = deviation;
-    tx.modem.chanbw        = 0x03;
+    tx.modem.chanbw        = CC1101_CHANBW_464_KHZ;
     tx.packet.mode         = CC1101_PKT_FIXED_E;
     tx.packet.max_length   = 1;
     tx.packet.crc_enable   = false;
@@ -942,5 +942,5 @@ void cc1101_start_status_monitor(cc1101_handle_t *dev, uint32_t period_ms)
 {
     if (!dev || period_ms == 0) return;
     dev->status_period_ms = period_ms;
-    xTaskCreate(cc1101_status_monitor_task, "rfstatus", 4096, dev, 5, NULL);
+    xTaskCreatePinnedToCore(cc1101_status_monitor_task, "rfstatus", 4096, dev, 5, NULL, 1);
 }

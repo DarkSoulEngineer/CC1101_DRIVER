@@ -5,6 +5,8 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "driver/gpio.h"
+#include "soc/soc.h"
+#include "soc/gpio_reg.h"
 #include "driver/gptimer.h"
 #include "sump_capture.h"
 #include "esp_task_wdt.h"
@@ -18,7 +20,13 @@
 
 static const char *TAG = "CAP";
 
+/* Safe capture/stream ceiling: above this the 1-byte-per-sample ISR
+ * overruns at 160 MHz and the watchdog reboots. */
+#define SUMP_MAX_RATE 250000
+
 /* ── state ─────────────────────────────────────────────────────────── */
+/* Read by the ISR but only written before the timer starts; deliberately
+ * non-volatile so capture_init() can memset() the whole struct. */
 static capture_state_t g_state;
 
 /* One byte per sample: bit0=GDO0, bit1=GDO2 */
@@ -33,12 +41,19 @@ static capture_freq_sweep_fn s_sweep_cb;
 /* Continuous stream state */
 static StreamBufferHandle_t s_stream_buf;
 static volatile bool        s_streaming;
+/* Stream batching: DRAM statics, IRAM-safe for the timer ISR */
+static uint8_t s_batch[8];
+static uint8_t s_batch_n;
 
 /* ISR state */
 static volatile uint32_t s_write_idx;
 static volatile uint32_t s_total_samples;
 static volatile bool    s_done;
 static volatile bool    s_capture_active;
+/* Host sent START/STREAM but the header isn't fully consumed yet, or the
+ * finite-capture dump is in flight: the USB transport is claimed, so RX
+ * packets must not interleave (see main.c rx_loop_task gate). */
+static volatile bool    s_capture_pending;
 
 /* ── transport ─────────────────────────────────────────────────────── */
 #if CONFIG_SUMP_TRANSPORT_UART
@@ -203,14 +218,30 @@ static IRAM_ATTR bool timer_isr_cb(gptimer_handle_t timer,
                                     const gptimer_alarm_event_data_t *edata,
                                     void *user_data)
 {
-    uint8_t sample = 0;
-    if (gpio_get_level(g_state.gdo0_pin)) sample |= 0x01;
-    if (g_state.gdo2_pin >= 0 && gpio_get_level(g_state.gdo2_pin)) sample |= 0x02;
+    /* IRAM-safe single read: gpio_get_level() is flash-resident, so at
+     * 250 kHz every sample caused flash cache misses that coalesced the
+     * timer alarm (delivery fell to ~60%) and starved CPU0 (TWDT). One
+     * GPIO_IN read samples both pins from the same instant. */
+    const uint32_t in = REG_READ(GPIO_IN_REG);
+    uint8_t sample = (in >> g_state.gdo0_pin) & 0x01;
+    if (g_state.gdo2_pin >= 0) {
+        sample |= ((in >> g_state.gdo2_pin) & 0x01) << 1;
+    }
 
     if (s_streaming) {
-        BaseType_t wake = pdFALSE;
-        xStreamBufferSendFromISR(s_stream_buf, &sample, 1, &wake);
-        return wake;
+        /* Batch 8 samples, one kernel call per 8 alarms: at 250 kHz the
+         * per-sample xStreamBufferSendFromISR critical section cost more
+         * than the 4us period (delivery ~71%). Statics live in DRAM, so
+         * this array is IRAM-safe like the ISR body. Tail: up to 7
+         * buffered samples are dropped at stream_stop — acceptable. */
+        s_batch[s_batch_n++] = sample;
+        if (s_batch_n == sizeof(s_batch)) {
+            s_batch_n = 0;
+            BaseType_t wake = pdFALSE;
+            xStreamBufferSendFromISR(s_stream_buf, s_batch, sizeof(s_batch), &wake);
+            return wake;
+        }
+        return false;
     }
 
     /* Guard against stale ISR invocations (e.g. from a just-stopped stream):
@@ -275,6 +306,7 @@ static void stream_start(uint32_t rate)
     gptimer_set_alarm_action(s_timer, &acfg);
 
     xStreamBufferReset(s_stream_buf);
+    s_batch_n   = 0;
     s_streaming = true;
 
     gptimer_enable(s_timer);
@@ -286,7 +318,9 @@ static void stream_stop(void)
 {
     gptimer_stop(s_timer);
     s_streaming        = false;
+    s_batch_n          = 0;
     s_capture_active   = false;
+    s_capture_pending  = false;
     s_write_idx        = 0;
     s_total_samples    = 0;
     ESP_LOGI(TAG, "Streaming stopped");
@@ -317,16 +351,18 @@ static void stream_task(void *arg)
         }
 
         if (cmd == CAPTURE_CMD_STREAM) {
+            s_capture_pending = true;
             uint8_t rb[4];
             if (transport_read(rb, 4) != 4) {
+                s_capture_pending = false;
                 continue;
             }
             uint32_t rate = (uint32_t)rb[0] | ((uint32_t)rb[1] << 8)
                           | ((uint32_t)rb[2] << 16) | ((uint32_t)rb[3] << 24);
-            if (rate == 0 || rate > 500000) {
-                ESP_LOGW(TAG, "Bad stream rate %lu, clamping to 500000",
-                         (unsigned long)rate);
-                rate = 500000;
+            if (rate == 0 || rate > SUMP_MAX_RATE) {
+                ESP_LOGW(TAG, "Bad stream rate %lu, clamping to %d",
+                         (unsigned long)rate, SUMP_MAX_RATE);
+                rate = SUMP_MAX_RATE;
             }
             g_state.sample_rate = rate;
             stream_start(rate);
@@ -390,8 +426,11 @@ static void stream_task(void *arg)
             continue;
         }
 
+        s_capture_pending = true;
+
         uint8_t hdr[8];
         if (transport_read(hdr, sizeof(hdr)) != sizeof(hdr)) {
+            s_capture_pending = false;
             continue;
         }
 
@@ -400,9 +439,10 @@ static void stream_task(void *arg)
         uint32_t count  = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8)
                         | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
 
-        if (rate == 0 || rate > 500000) {
-            ESP_LOGW(TAG, "Bad rate %lu, clamping to 500000", (unsigned long)rate);
-            rate = 500000;
+        if (rate == 0 || rate > SUMP_MAX_RATE) {
+            ESP_LOGW(TAG, "Bad rate %lu, clamping to %d",
+                     (unsigned long)rate, SUMP_MAX_RATE);
+            rate = SUMP_MAX_RATE;
         }
         if (count > s_buf_size) {
             ESP_LOGW(TAG, "Count %lu exceeds buffer %lu, clamping",
@@ -448,8 +488,12 @@ static void stream_task(void *arg)
         ESP_LOGI(TAG, "Capture done: %lu bytes, streaming...",
                  (unsigned long)count);
 
-        /* Stream raw bytes directly */
-        transport_write(s_capture_buf, count);
+        /* Stream raw bytes directly — 60s backstop so a multi-MB PSRAM
+         * buffer survives slow USB reads (host-side timeout is 30s). */
+        if (!transport_write_timeout(s_capture_buf, count, 60000)) {
+            ESP_LOGW(TAG, "Capture dump aborted (USB write stalled)");
+        }
+        s_capture_pending = false;
 
         ESP_LOGI(TAG, "Stream complete");
     }
@@ -474,7 +518,7 @@ int capture_send(const uint8_t *data, size_t len)
 
 bool capture_is_active(void)
 {
-    return s_capture_active || s_streaming;
+    return s_capture_active || s_streaming || s_capture_pending;
 }
 
 esp_err_t capture_init(gpio_num_t gdo0_pin, gpio_num_t gdo2_pin)
@@ -486,21 +530,28 @@ esp_err_t capture_init(gpio_num_t gdo0_pin, gpio_num_t gdo2_pin)
 
     s_buf_size = CONFIG_SUMP_MAX_SAMPLES;
 
-    /* Allocate capture buffer — try IRAM first for ISR speed, fall back to PSRAM */
-    s_capture_buf = heap_caps_malloc(s_buf_size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    /* PSRAM-first: the big capture window (2M samples = 2 MB) only fits
+     * in external RAM. Fall back to internal RAM at the known-good size
+     * when PSRAM is absent or misconfigured (SPIRAM_IGNORE_NOTFOUND),
+     * so the device still boots and captures at 262144. The ISR stores
+     * one byte per sample directly into this buffer — PSRAM writes are
+     * cached, so the IRAM ISR path is unaffected. */
+    s_capture_buf = heap_caps_malloc(s_buf_size, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
     if (!s_capture_buf) {
-        s_capture_buf = heap_caps_malloc(s_buf_size, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
+        s_capture_buf = heap_caps_malloc(s_buf_size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     }
-    if (!s_capture_buf) {
-        s_capture_buf = heap_caps_malloc(s_buf_size, MALLOC_CAP_8BIT);
+    if (!s_capture_buf && s_buf_size > 262144) {
+        s_buf_size = 262144;
+        s_capture_buf = heap_caps_malloc(s_buf_size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     }
     if (!s_capture_buf) {
         ESP_LOGE(TAG, "Failed to allocate capture buffer (%lu bytes)",
                  (unsigned long)s_buf_size);
         return ESP_ERR_NO_MEM;
     }
-
-    ESP_LOGI(TAG, "Buffer: %p (%lu bytes)", s_capture_buf, (unsigned long)s_buf_size);
+    ESP_LOGI(TAG, "Buffer: %p (%lu bytes%s)", s_capture_buf,
+             (unsigned long)s_buf_size,
+             (s_buf_size == CONFIG_SUMP_MAX_SAMPLES) ? "" : " - fallback");
 
     /* Continuous-stream ring buffer (ISR producer / task consumer) */
     s_stream_buf = xStreamBufferCreate(CAPTURE_STREAM_BUF_SIZE, 1);
@@ -534,9 +585,9 @@ esp_err_t capture_init(gpio_num_t gdo0_pin, gpio_num_t gdo2_pin)
     transport_init();
     transport_drain();
 
-    /* Stream command loop task — on CPU0, low priority so IDLE1 on CPU1 is fine */
+    /* Stream command loop task — on CPU1, low priority (PROBE 1: was CPU0) */
     xTaskCreatePinnedToCore(stream_task, "stream", 8192, NULL, 2,
-                            &s_stream_task, 0);
+                            &s_stream_task, 1);
 
     /* Send a boot marker so the host knows we're alive */
     uint8_t marker = 0xAA;

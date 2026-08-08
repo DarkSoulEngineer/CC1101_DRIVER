@@ -86,6 +86,10 @@ DEFAULT_DEV = 50000.0
 MODS = ('2fsk', '2psk', 'ask')
 SYNC_BITS = np.array([int(b) for b in '1101111010101111'], dtype=np.uint8)
 
+# CONFIG_SUMP_MAX_SAMPLES in sdkconfig: the firmware clamps the capture count
+# to this, so requesting more would only hang until timeout.
+FIRMWARE_MAX_SAMPLES = 2097152
+
 
 def actual_rate(requested):
     alarm = 1000000 // requested
@@ -117,23 +121,42 @@ def drain(ser, seconds=1.0):
     return n
 
 
-def capture(ser, rate, count, timeout=30.0):
+def capture(ser, rate, count, timeout=30.0, strict=True):
+    if rate > 250000:
+        print(f'[!] WARNING: rate {rate} > 250 kHz is at/beyond the ISR '
+              f'overrun boundary (interrupt watchdog reboot)')
+    if count > FIRMWARE_MAX_SAMPLES:
+        print(f'[!] WARNING: count {count} > firmware max '
+              f'{FIRMWARE_MAX_SAMPLES}, clamping (raise '
+              f'CONFIG_SUMP_MAX_SAMPLES in sdkconfig to capture more)')
+        count = FIRMWARE_MAX_SAMPLES
     ser.reset_input_buffer()
     ser.write(bytes([CMD_CAPTURE]))
     ser.write(struct.pack('<II', rate, count))
     print(f'[*] sent capture cmd rate={rate} count={count}')
     raw = bytearray()
     t0 = time.time()
+    stalled = 0.0
     while len(raw) < count:
         if ser.in_waiting:
             raw.extend(ser.read(ser.in_waiting))
+            stalled = 0.0
         elif time.time() - t0 > timeout:
             print(f'[!] timeout got {len(raw)}/{count}')
             break
         else:
             time.sleep(0.002)
+            stalled += 0.002
+            if stalled > 5.0:
+                print(f'[!] USB stalled ({stalled:.1f}s no data), got '
+                      f'{len(raw)}/{count}')
+                break
     raw = bytes(raw[:count])
     print(f'[+] got {len(raw)} bytes')
+    if strict and len(raw) < count:
+        raise RuntimeError(
+            f'capture truncated: got {len(raw)}/{count} bytes '
+            f'(USB stall or timeout); check rate <= 250 kHz and cable')
     return raw
 
 
@@ -244,7 +267,7 @@ def mod_synth_from_bits(bits, amp, mod, if_hz, dev_hz, rate_actual, target_len,
     return fsk
 
 
-def save_vcd(ch0, ch1, ch1cr, ch1c, fsk, rate, fn):
+def save_vcd(ch0, ch1, ch1c, fsk, rate, fn):
     tps = 1000000000.0 / rate
     with open(fn, 'w', newline='\n') as f:
         f.write('$timescale 1ns $end\n')
@@ -252,35 +275,30 @@ def save_vcd(ch0, ch1, ch1cr, ch1c, fsk, rate, fn):
         f.write('$scope module CC1101 $end\n')
         f.write('$var wire 1 ! GDO0 $end\n')
         f.write('$var wire 1 @ GDO2 $end\n')
-        f.write('$var wire 1 # GDO2_CLEAN_RAW $end\n')
         f.write('$var wire 1 $ GDO2_CLEAN $end\n')
         f.write('$var real 1 % FSK $end\n')
         f.write('$upscope $end\n$enddefinitions $end\n')
-        f.write('$dumpvars\nx!\nx@\nx#\nx$\n0.0%\n$end\n')
+        f.write('$dumpvars\nx!\nx@\nx$\n0.0%\n$end\n')
         p0 = None
         p1 = None
-        pr = None
         pc = None
         pf = None
         for i in range(len(ch0)):
-            if (ch0[i] != p0 or ch1[i] != p1 or ch1cr[i] != pr
-                    or ch1c[i] != pc or fsk[i] != pf):
+            if (ch0[i] != p0 or ch1[i] != p1 or ch1c[i] != pc or fsk[i] != pf):
                 f.write('#%d\n' % int(i * tps))
                 if ch0[i] != p0:
                     f.write(f'{ch0[i]}!\n')
                 if ch1[i] != p1:
                     f.write(f'{ch1[i]}@\n')
-                if ch1cr[i] != pr:
-                    f.write(f'{ch1cr[i]}#\n')
                 if ch1c[i] != pc:
                     f.write(f'{ch1c[i]}$\n')
                 if fsk[i] != pf:
                     f.write(f'{fsk[i]:.2f}%\n')
-                pf, pc, pr, p1, p0 = fsk[i], ch1c[i], ch1cr[i], ch1[i], ch0[i]
+                pf, pc, p1, p0 = fsk[i], ch1c[i], ch1[i], ch0[i]
     print(f'[+] {fn}')
 
 
-def save_sr(ch0, ch1, ch1cr, ch1c, fsk, rate, fn):
+def save_sr(ch0, ch1, ch1c, fsk, rate, fn):
     packed = bytearray(len(ch0))
     for i in range(len(ch0)):
         b = 0
@@ -288,22 +306,20 @@ def save_sr(ch0, ch1, ch1cr, ch1c, fsk, rate, fn):
             b |= 1
         if ch1[i]:
             b |= 2
-        if ch1cr[i]:
-            b |= 4
         if ch1c[i]:
-            b |= 8
+            b |= 4
         packed[i] = b
     meta = ('[global]\nsigrok version = 2\n\n'
             '[device 1]\ncapturefile = logic-1\nunitsize = 1\n'
-            'total probes = 4\nsamplerate = %d\ntotal analog = 1\n'
-            'probe1 = GDO0\nprobe2 = GDO2\nprobe3 = GDO2_CLEAN_RAW\n'
-            'probe4 = GDO2_CLEAN\nanalog5 = FSK\n' % rate)
+            'total probes = 3\nsamplerate = %d\ntotal analog = 1\n'
+            'probe1 = GDO0\nprobe2 = GDO2\nprobe3 = GDO2_CLEAN\n'
+            'analog4 = FSK\n' % rate)
     with zipfile.ZipFile(fn, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr('version', '2')
         zf.writestr('metadata', meta)
         zf.writestr('logic-1-1', bytes(packed))
-        zf.writestr('analog-1-5', fsk.astype('<f4').tobytes())
-    print(f'[+] {fn} (GDO0, GDO2, GDO2_CLEAN_RAW[UART], GDO2_CLEAN[UART] logic | FSK analog)')
+        zf.writestr('analog-1-4', fsk.astype('<f4').tobytes())
+    print(f'[+] {fn} (GDO0, GDO2, GDO2_CLEAN logic | FSK analog)')
 
 
 def main():
@@ -329,11 +345,13 @@ def main():
                     default=rfuzz_tools.DEFAULT_PREAMBLE_BYTES,
                     help='preamble bytes in the TX signal (default 4)')
     ap.add_argument('--dump', action='store_true', help='hex dump raw bytes')
+    ap.add_argument('--no-strict', action='store_true',
+                    help='accept a truncated capture instead of aborting')
     args = ap.parse_args()
 
     ser = open_port(args.port, args.baud)
     drain(ser)
-    raw = capture(ser, args.rate, args.samples)
+    raw = capture(ser, args.rate, args.samples, strict=not args.no_strict)
     ser.close()
 
     if args.dump:
@@ -376,20 +394,17 @@ def main():
         fsk += mod_synth_from_bits(pbits, args.analog_amp, args.mod, if_dev,
                                    dev_hz, r_actual, len(ch1), spb, start)
 
-    ch1cr = rfuzz_tools.clean_gdo2(packets, gstarts, spb,
+    ch1c = rfuzz_tools.clean_gdo2(packets, gstarts, spb,
                                    args.preamble, len(ch1), framed=True,
                                    corrected=True)
-    ch1c = rfuzz_tools.clean_gdo2(packets, gstarts, spb,
-                                  args.preamble, len(ch1), framed=True)
-
     stats(ch0, ch1, r_actual, args.analog_amp, args.mod, if_dev, dev_hz)
 
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     base = args.out if args.out else f'capture_{ts}'
     with open(base + '.raw', 'wb') as f:
         f.write(raw)
-    save_sr(ch0, ch1, ch1cr, ch1c, fsk, int(round(r_actual)), base + '.sr')
-    save_vcd(ch0, ch1, ch1cr, ch1c, fsk, r_actual, base + '.vcd')
+    save_sr(ch0, ch1, ch1c, fsk, int(round(r_actual)), base + '.sr')
+    save_vcd(ch0, ch1, ch1c, fsk, r_actual, base + '.vcd')
 
 
 if __name__ == '__main__':

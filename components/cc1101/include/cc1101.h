@@ -194,6 +194,16 @@
 #define CC1101_MDMCFG4_VALUE(chanbw_e, chanbw_m, drate_e) \
     ((((chanbw_e) & 0x3) << 6) | (((chanbw_m) & 0x3) << 4) | ((drate_e) & 0xF))
 
+/* Channel filter bandwidth = 26e6 / (8 * (4 + CHANBW_M) * 2^CHANBW_E) Hz.
+ * These are the packed MDMCFG4 high-nibble values (the `chanbw` field of
+ * cc1101_modem_config_t is passed straight through as this nibble). */
+#define CC1101_CHANBW_812_5_KHZ   0x00  /* E=0, M=0 */
+#define CC1101_CHANBW_650_KHZ     0x10  /* E=0, M=1 */
+#define CC1101_CHANBW_541_7_KHZ   0x20  /* E=0, M=2 */
+#define CC1101_CHANBW_464_KHZ     0x30  /* E=0, M=3 */
+#define CC1101_CHANBW_406_25_KHZ  0x40  /* E=1, M=0 */
+#define CC1101_CHANBW_325_KHZ     0x50  /* E=1, M=1 */
+
 #define CC1101_MDMCFG3_VALUE(drate_m) \
     ((drate_m) & 0xFF)
 
@@ -278,7 +288,8 @@ typedef struct {
     uint8_t             preamble_bytes;  /* 0,2,4,8,12,16,20,24,28,32 */
     uint32_t            datarate_bps;
     uint8_t             deviation;       /* register value (0-7) */
-    uint8_t             chanbw;          /* MDMCFG4 channel bandwidth (manual) */
+    uint8_t             chanbw;          /* MDMCFG4 channel filter bandwidth:
+                                            packed high nibble, use CC1101_CHANBW_*_KHZ */
     uint32_t            channel_spacing; /* MDMCFG0 register value */
 } cc1101_modem_config_t;
 
@@ -324,7 +335,7 @@ typedef struct cc1101_dev {
     bool                isr_enabled;
     bool                append_status;
     volatile bool       tx_pending;
-    TaskHandle_t        tx_caller_task;
+    volatile TaskHandle_t tx_caller_task;  /* read/written from the GDO0 ISR */
 
     /* Async serial RX app config (set by cc1101_config_async_rx) */
     uint32_t async_freq_hz;

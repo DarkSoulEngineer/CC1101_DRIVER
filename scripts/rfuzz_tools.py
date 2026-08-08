@@ -38,6 +38,15 @@ SYNC_BITS = np.array(
     [int(b) for b in "1101111010101111"], dtype=np.uint8
 )
 SYNC_BYTES = bytes([0xDE, 0xAF])
+# The TX signal generator (gen_2fsk.py) sends sync 0xBEEF; SYNC_BITS above is
+# the 0xDEAF word used by the legacy sniff tooling.  The multi-phase decoder
+# (find_packets_multiphase) and the .sr/.vcd renderers for the rfuzz testcase
+# use the real TX word - keep the legacy constants untouched for the other
+# tools that depend on them.
+MP_SYNC_BITS = np.array(
+    [int(b) for b in "1011111011101111"], dtype=np.uint8
+)
+MP_SYNC_BYTES = bytes([0xBE, 0xEF])
 DEFAULT_PREAMBLE_BYTES = 4
 PREAMBLE_BITS = np.array([1, 0] * 16, dtype=np.uint8)
 PAYLOAD_EXPECT = bytes([0x01, 0x02, 0x03, 0x04])
@@ -335,9 +344,16 @@ def packet_starts(ch0, spb, packets, preamble_bytes=DEFAULT_PREAMBLE_BYTES):
     return starts
 
 
-def find_packets(bitseq, spb, preamble_bytes=DEFAULT_PREAMBLE_BYTES):
+def bits_expect(data):
+    """MSB-first bit array of a byte sequence (the expected payload)."""
+    return bits_msb(data)
+
+
+def find_packets(bitseq, spb, preamble_bytes=DEFAULT_PREAMBLE_BYTES,
+                 payload_expect=PAYLOAD_EXPECT):
     sync_len = len(SYNC_BITS)
     pre_len = preamble_bytes * 8
+    exp_bits = bits_expect(payload_expect)
     packets = []
     i = 0
     while i < len(bitseq) - sync_len:
@@ -353,9 +369,8 @@ def find_packets(bitseq, spb, preamble_bytes=DEFAULT_PREAMBLE_BYTES):
                 for j in range(0, 32, 8)
             )
             errors = 0
-            if len(payload) == 4:
-                exp = bits_msb(PAYLOAD_EXPECT)
-                errors = int(np.count_nonzero(payload_bits != exp))
+            if len(payload) == 4 and len(exp_bits) == 32:
+                errors = int(np.count_nonzero(payload_bits != exp_bits))
             packets.append(
                 {
                     "offset_bits": int(start),
@@ -368,6 +383,83 @@ def find_packets(bitseq, spb, preamble_bytes=DEFAULT_PREAMBLE_BYTES):
             i += sync_len
         else:
             i += 1
+    return packets
+
+
+def find_packets_multiphase(ch, spb, sync_tol=3, payload_expect=PAYLOAD_EXPECT,
+                            preamble_bytes=DEFAULT_PREAMBLE_BYTES, rate=None):
+    """Phase-swept sync search over the raw GDO2 async-demod stream.
+
+    The CC1101 re-acquires bit-sync at a different phase per packet after each
+    inter-burst gap, so a single fixed sampling phase (find_packets) misses
+    most packets.  This sweeps every phase of the samples-per-bit grid,
+    sampling one bit per cell directly from the raw samples (no glitch filter,
+    no run quantization), and scans each phase stream for the TX sync word
+    0xBEEF (gen_2fsk.py) with a bit-error tolerance.
+
+    Returns one representative per distinct packet (deduped across phases by
+    sync-start sample, keeping the lowest (sync_errors, bit_errors)); noise
+    matches are dropped unless the sync is perfect.  Each dict carries the
+    legacy find_packets keys (offset_bits, preamble_ok, sync, payload,
+    bit_errors) plus the multi-phase report keys (phase, sync_errors,
+    timestamp_s, sync_start).
+
+    offset_bits is the preamble-start bit index on the ~1-bit-per-spb
+    quantized grid (round(sync_start/spb) - preamble*8), so packet_starts /
+    refine_packets / clean_gdo2 keep working unchanged.
+    """
+    ch = np.asarray(ch, dtype=np.uint8)
+    spbi = max(1, int(round(spb)))
+    sync_len = len(MP_SYNC_BITS)
+    exp_bits = bits_expect(payload_expect)
+    pay_len = len(exp_bits)
+    pre_len = preamble_bytes * 8
+    view = np.lib.stride_tricks.sliding_window_view
+    hits = []
+    for phase in range(spbi):
+        b = ch[phase::spbi]
+        if len(b) <= sync_len + pay_len:
+            continue
+        dist = np.count_nonzero(view(b, sync_len) != MP_SYNC_BITS, axis=1)
+        for i in np.flatnonzero(dist <= sync_tol):
+            j = i + sync_len + pay_len
+            if j > len(b):
+                continue
+            pay_bits = b[i + sync_len:j]
+            pay_err = int(np.count_nonzero(pay_bits != exp_bits))
+            hits.append((int(i * spbi + phase), phase, int(dist[i]), pay_err,
+                         bytes_from_bits(pay_bits)))
+    if not hits:
+        return []
+    hits.sort(key=lambda h: h[0])
+    groups = []
+    for h in hits:
+        if groups and h[0] - groups[-1][-1][0] <= spbi:
+            groups[-1].append(h)
+        else:
+            groups.append([h])
+    packets = []
+    for sync_start, phase, sync_err, pay_err, payload in (
+            min(g, key=lambda h: (h[2], h[3])) for g in groups):
+        if sync_err and pay_err > 2:
+            continue
+        b = ch[phase::spbi]
+        i = (sync_start - phase) // spbi
+        window = b[i - pre_len:i] if i >= pre_len else np.array([], np.uint8)
+        d = {
+            "offset_bits": i - pre_len,
+            "preamble_ok": preamble_ok(window, pre_len),
+            "sync": True,
+            "payload": payload,
+            "bit_errors": pay_err,
+            "phase": phase,
+            "sync_errors": sync_err,
+            "sync_start": sync_start,
+        }
+        if rate:
+            d["timestamp_s"] = sync_start / rate
+        packets.append(d)
+    packets.sort(key=lambda p: p["sync_start"])
     return packets
 
 
@@ -398,7 +490,7 @@ def uart_encode_bytes(data):
 
 
 def clean_gdo2(packets, starts, spb, preamble_bytes, target_len, framed=False,
-               corrected=False):
+               corrected=False, sync_bytes=SYNC_BYTES):
     """Noise-gated reconstruction of GDO2 from the decoded packet data.
 
     GDO2 is the raw async-serial demodulator output: it carries sub-bit
@@ -447,19 +539,19 @@ def clean_gdo2(packets, starts, spb, preamble_bytes, target_len, framed=False,
                 pb = p.get("pbits")
                 if pb is not None:
                     pre_len = preamble_bytes * 8
-                    sync_len = len(SYNC_BITS)
-                    sync_bytes = bytes_from_bits(pb[pre_len:pre_len + sync_len])
+                    sync_len = len(sync_bytes) * 8
+                    sync_bytes_rx = bytes_from_bits(pb[pre_len:pre_len + sync_len])
                     pay_bytes = bytes_from_bits(pb[pre_len + sync_len:])
-                    data = bytes([0xAA]) * preamble_bytes + sync_bytes + pay_bytes
+                    data = bytes([0xAA]) * preamble_bytes + sync_bytes_rx + pay_bytes
                 else:
-                    data = bytes([0xAA]) * preamble_bytes + SYNC_BYTES + payload
+                    data = bytes([0xAA]) * preamble_bytes + sync_bytes + payload
             else:
-                data = bytes([0xAA]) * preamble_bytes + SYNC_BYTES + payload
+                data = bytes([0xAA]) * preamble_bytes + sync_bytes + payload
             bits = uart_encode_bytes(data)
         else:
             bits = np.concatenate([
                 preamble_bits(preamble_bytes),
-                SYNC_BITS,
+                bits_msb(sync_bytes),
                 bits_msb(payload),
             ])
         if start < 0:
@@ -472,7 +564,8 @@ def clean_gdo2(packets, starts, spb, preamble_bytes, target_len, framed=False,
     return out
 
 
-def refine_packets(ch1, spb, packets, starts, preamble_bytes):
+def refine_packets(ch1, spb, packets, starts, preamble_bytes,
+                   payload_expect=PAYLOAD_EXPECT, sync_bits=SYNC_BITS):
     """Re-decode each packet's bits by majority vote over the received cells.
 
     find_packets locates the sync in the run-length-quantized stream, which
@@ -491,7 +584,7 @@ def refine_packets(ch1, spb, packets, starts, preamble_bytes):
     GDO0 `starts` remain the reference for the analog FSK render).
     """
     pre_len = preamble_bytes * 8
-    sync_len = len(SYNC_BITS)
+    sync_len = len(sync_bits)
     nbits = pre_len + sync_len + 32
     runs = rl_encode(remove_glitches(ch1, 10))
     qbits, qstarts = runs_to_bits_pos(runs, spb)
@@ -510,15 +603,15 @@ def refine_packets(ch1, spb, packets, starts, preamble_bytes):
             int("".join(str(b) for b in payload_bits[j:j + 8]), 2)
             for j in range(0, 32, 8)
         )
-        errors = int(np.count_nonzero(payload_bits != bits_msb(PAYLOAD_EXPECT)))
-        if (pbits[pre_len:pre_len + sync_len] != SYNC_BITS).any():
+        errors = int(np.count_nonzero(payload_bits != bits_expect(payload_expect)))
+        if (pbits[pre_len:pre_len + sync_len] != sync_bits).any():
             # Voted grid lost the sync (a glitch dropped a quantized bit and
             # shifted the cell mapping); fall back to the find_packets decode.
             payload = p["payload"]
             errors = p["bit_errors"]
             pbits = np.concatenate([
                 preamble_bits(preamble_bytes),
-                SYNC_BITS,
+                sync_bits,
                 bits_msb(payload),
             ])
         p["payload"] = payload
@@ -559,9 +652,23 @@ def common_args(ap):
                     help="glitch run threshold in samples (default 10)")
     ap.add_argument("--preamble", type=int, default=DEFAULT_PREAMBLE_BYTES,
                     help="preamble bytes in the TX signal (default 4)")
+    ap.add_argument("--payload-expect", type=str, default=None,
+                    help="expected payload hex used for bit_errors/OK reporting "
+                         "(default 01020304)")
+
+
+def _payload_expect(args):
+    """Parse --payload-expect into bytes (default PAYLOAD_EXPECT)."""
+    if getattr(args, "payload_expect", None):
+        try:
+            return bytes.fromhex(args.payload_expect)
+        except ValueError:
+            sys.exit(f"error: invalid --payload-expect hex {args.payload_expect!r}")
+    return PAYLOAD_EXPECT
 
 
 def cmd_decode(args):
+    pexpect = _payload_expect(args)
     ch0, ch1, rate = load_raw(args.raw, args.rate)
     seed = args.spb or (rate / BPS)
     spb, bps = seed, rate / seed
@@ -569,12 +676,14 @@ def cmd_decode(args):
         spb, bps, _ = detect_datarate_iter(ch0, ch1, rate, seed, args.preamble,
                                            args.glitch)
     bits = clean_bits(ch1, spb, args.glitch)
-    packets = find_packets(bits, spb, args.preamble)
+    packets = find_packets(bits, spb, args.preamble, pexpect)
     starts = packet_starts(ch0, spb, packets, args.preamble)
-    packets, _ = refine_packets(ch1, spb, packets, starts, args.preamble)
+    packets, _ = refine_packets(ch1, spb, packets, starts, args.preamble,
+                                pexpect)
     print(f"rate_actual={rate:.1f} Hz spb={spb:.3f} bps={bps:.0f} "
           f"samples={len(ch1)} bits={len(bits)} packets={len(packets)}")
-    for p in packets:
+    report = packets if not args.max else packets[:args.max]
+    for p in report:
         flag = "OK " if p["preamble_ok"] and not p["bit_errors"] else "!! "
         hexp = " ".join(f"{b:02X}" for b in p["payload"])
         print(f"{flag}bit@{p['offset_bits']:>7} pre={'Y' if p['preamble_ok'] else 'N'} "
@@ -590,6 +699,7 @@ def cmd_clean(args):
     the before/after decode quality: glitch filter + edge-resynced cells +
     majority vote + noise-tail gating (see clean_raw_gdo2).  Also writes a
     `<base>_clean.raw` (bit0=GDO0, bit1=corrected GDO2) for comparison."""
+    pexpect = _payload_expect(args)
     ch0, ch1, rate = load_raw(args.raw, args.rate)
     seed = args.spb or (rate / BPS)
     spb, bps, windows = detect_datarate_iter(ch0, ch1, rate, seed,
@@ -605,10 +715,10 @@ def cmd_clean(args):
 
     def decode(ch):
         bits = clean_bits(np.asarray(ch, np.uint8), spb, args.glitch)
-        packets = find_packets(bits, spb, args.preamble)
+        packets = find_packets(bits, spb, args.preamble, pexpect)
         starts = packet_starts(ch0, spb, packets, args.preamble)
         packets, _ = refine_packets(np.asarray(ch, np.uint8), spb, packets,
-                                    starts, args.preamble)
+                                    starts, args.preamble, pexpect)
         return packets
 
     raw_pk = decode(ch1)
@@ -633,21 +743,18 @@ def cmd_clean(args):
 
 
 def cmd_regen(args):
+    pexpect = _payload_expect(args)
     ch0, ch1, rate = load_raw(args.raw, args.rate)
-    seed = args.spb or (rate / BPS)
-    spb, bps = seed, rate / seed
-    if not args.spb:
-        spb, bps, _ = detect_datarate_iter(ch0, ch1, rate, seed, args.preamble,
-                                           args.glitch)
-    bits = clean_bits(ch1, spb, args.glitch)
-    packets = find_packets(bits, spb, args.preamble)
+    spb = args.spb or (rate / BPS)
+    bps = rate / spb
+    packets = find_packets_multiphase(ch1, spb, payload_expect=pexpect,
+                                      preamble_bytes=args.preamble)
     if not packets:
         sys.exit("error: no packets decoded, nothing to regenerate")
     starts = packet_starts(ch0, spb, packets, args.preamble)
-    packets, _ = refine_packets(ch1, spb, packets, starts, args.preamble)
 
     pre_len = args.preamble * 8
-    pkt_bits = pre_len + len(SYNC_BITS) + 32
+    pkt_bits = pre_len + len(MP_SYNC_BITS) + 32
     sps = int(round(FS / bps))
     full_n = round(len(ch1) / rate * FS)
     iq = np.zeros(full_n, dtype=np.complex64)
@@ -655,13 +762,18 @@ def cmd_regen(args):
     for p, start_sample in zip(packets, starts):
         block = np.concatenate([
             preamble_bits(args.preamble),
-            SYNC_BITS,
+            MP_SYNC_BITS,
             bits_msb(p["payload"]),
         ])
         start = round(start_sample / rate * FS)
         end = start + len(block) * sps
-        if end <= full_n:
+        if 0 <= start and end <= full_n:
             iq[start:end] = modulate(block, args.dev, args.amp, sps)
+            # Extend the last bit one sample so a phase-rotation demodulator
+            # can measure the final bit cell (N samples only yield N-1 windows).
+            if end < full_n:
+                f = args.dev if block[-1] else -args.dev
+                iq[end] = iq[end - 1] * np.exp(1j * 2.0 * np.pi * f / FS)
             placed += 1
     full = write_c8(args.out, iq)
     iq_i = np.stack((np.real(iq), np.zeros_like(np.real(iq))),
@@ -687,7 +799,7 @@ def cmd_manual(args):
                                          args.glitch)
     cleaned = remove_glitches(ch1, args.glitch)
     bits, starts = runs_to_bits_pos(rl_encode(cleaned), spb)
-    packets = find_packets(bits, spb, args.preamble)
+    packets = find_packets(bits, spb, args.preamble, _payload_expect(args))
     if not packets:
         sys.exit("error: no packets to decode manually")
     p = packets[0]
@@ -791,10 +903,7 @@ def main():
     c.set_defaults(func=cmd_clean)
 
     args = ap.parse_args()
-    packets = args.func(args)
-    if args.cmd == "decode" and args.max and packets:
-        for p in packets[args.max:]:
-            pass
+    args.func(args)
 
 
 if __name__ == "__main__":
