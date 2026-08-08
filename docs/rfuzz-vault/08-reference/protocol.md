@@ -4,9 +4,9 @@
 
 ---
 
-## Protocol 1: Custom Raw Streaming (capture.py)
+## Protocol 1: Custom Raw Streaming
 
-Used by `scripts/capture.py` and `scripts/sump_stream_capture.py`.
+Used by `scripts/sniff.py` and `scripts/capture_custom.py`.
 
 ### Host → ESP32 Commands
 
@@ -68,7 +68,7 @@ Host                    ESP32
 
 ---
 
-## Protocol 2: SUMP/OLS (capture_sump.py)
+## Protocol 2: SUMP/OLS
 
 Full OLS protocol subset for PulseView compatibility. Used when `CONFIG_SUMP_TRANSPORT_USB=y` or `UART`.
 
@@ -228,7 +228,7 @@ I (3002) RFUZZ: TX Complete (Hardware Confirmed)
 protocols:
   custom_raw:
     name: "Custom Raw Streaming"
-    used_by: ["capture.py", "sump_stream_capture.py"]
+    used_by: ["sniff.py", "capture_custom.py"]
     host_to_device:
       - {cmd: 0x01, name: "START", args: ["rate:u32le", "count:u32le"], bytes: 9}
       - {cmd: 0x02, name: "TX_TRIGGER", args: [], bytes: 1}
@@ -244,7 +244,7 @@ protocols:
   
   sump_ols:
     name: "SUMP/OLS Protocol"
-    used_by: ["capture_sump.py"]
+    used_by: []
     host_to_device:
       - {cmd: 0x00, name: "RESET", args: []}
       - {cmd: 0x01, name: "RUN", args: []}
@@ -291,7 +291,7 @@ protocols:
 
 ## Related
 
-- [[04-host-scripts/capture_sump.py|SUMP Capture Script]]
+- [[04-host-scripts/index|Host Scripts]]
 - [[02-firmware/sump-capture|SUMP Capture Internals]]
 - [[08-reference/register-map|Register Map]]
 - [[08-reference/troubleshooting|Troubleshooting]]

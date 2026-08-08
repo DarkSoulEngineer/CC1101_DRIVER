@@ -51,7 +51,7 @@ Each phase is one script call, so it can also be run by hand:
 
 ```bash
 # 1. Generate the gapped signal (3rd arg = idle ms between packets)
-python gen_2fsk.py rfuzz_2fsk_gap.c8 60 50
+python rfuzz_tools.py gen rfuzz_2fsk_gap.c8 --repeat 60 --gap-ms 50
 
 # 2. Deploy to the Dragon OS VM
 scp rfuzz_2fsk_gap.c8 dragon@192.168.1.101:~/rfuzz_2fsk_gap.c8
@@ -177,6 +177,29 @@ python rfuzz_testcase.py --name shot1 --packets 1 --gap-ms 0
 The capture window opens first, then TX starts 150 ms later — HackRF startup
 (~80–300 ms) places the burst safely inside the window. At 250 kHz this gives
 ~104 samples/bit for hand verification.
+
+---
+
+## Offline / Demo Mode (`--offline` / `--demo`)
+
+Runs the full end-to-end 2FSK testcase **without any hardware** — no COM7, no HackRF, no Dragon OS VM. Instead of capturing from the CC1101 over USB, it uses **synthetic GDO0/GDO2 captures** (absorbed from the deleted `test_synth_signals.py` offline path). The same decode → regen verification pipeline runs against the synthetic data, so the decode logic, packet framing, and regeneration are all exercised.
+
+```bash
+python rfuzz_testcase.py --offline       # synthetic captures, no hardware
+python rfuzz_testcase.py --demo          # same as --offline (alias)
+```
+
+**What it does**:
+1. **Generate** the gapped 2FSK signal via `rfuzz_tools.py gen` (same as hardware mode).
+2. **Synthesize** GDO0/GDO2 capture bytes that mimic the CC1101 async-demod output (preamble `0xAA×4`, sync `0xDEAF`, payload `01 02 03 04`, with realistic glitch noise).
+3. **Decode** the synthetic capture with `rfuzz_tools.py decode` — verifies packet count and `payload_ok 100%`.
+4. **Regen** the decoded packets to 2FSK I/Q `.c8` for URH comparison.
+
+**Output**: same files as hardware mode (`rfuzz_2fsk_gap.c8`, `rfuzz_testcase.raw/.sr/.vcd`, `rfuzz_testcase_regen.c8`, `rfuzz_testcase_regen_i.c8`), but the `.raw`/`.sr`/`.vcd` are synthesized rather than captured from hardware.
+
+**Use cases**: CI regression, development without hardware, decode pipeline validation.
+
+---
 
 ## Key parameters & gotchas
 

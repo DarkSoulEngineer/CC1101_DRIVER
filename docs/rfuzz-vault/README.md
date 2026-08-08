@@ -24,7 +24,7 @@ docs/rfuzz-vault/
 │   └── examples.md              # Example projects (usb_interface_test)
 ├── 04-host-scripts/
 │   ├── index.md                 # All Python scripts overview
-│   └── capture_sump.py.md       # Detailed SUMP capture script reference
+
 ├── 05-dragon-os/
 │   ├── ssh-setup.md             # SSH keys, connection to dragon@192.168.1.101
 │   ├── hackrf-ops.md            # hackrf_transfer, sweep, gain staging
@@ -102,7 +102,7 @@ Host and VM must be on the same LAN. Reference topology: host `192.168.1.136`, D
 
 ### RF Researcher / Reverse Engineer
 - [[03-applications/main-capture|Async RX Capture (Sniffing)]]
-- [[04-host-scripts/capture_sump.py|SUMP Capture → PulseView]]
+- [[04-host-scripts/index|Host Scripts]]
 - [[05-dragon-os/coordinated|Coordinated ESP32+HackRF Workflows]]
 - [[05-dragon-os/ssh-setup|Dragon OS SSH Setup]]
 
@@ -166,7 +166,7 @@ Host and VM must be on the same LAN. Reference topology: host `192.168.1.136`, D
 
 ### RF Analysis
 1. [[03-applications/main-capture|Async Capture]]
-2. [[04-host-scripts/capture_sump.py|SUMP Script]]
+2. [[04-host-scripts/index|Host Scripts]]
 3. [[05-dragon-os/ssh-setup|Dragon OS]]
 4. [[05-dragon-os/coordinated|Coordinated Workflows]]
 
@@ -180,7 +180,7 @@ Host and VM must be on the same LAN. Reference topology: host `192.168.1.136`, D
 | `#firmware` | architecture, cc1101-driver, sump-capture |
 | `#tx` | tx-beacon, examples |
 | `#rx` | main-capture, rx-packet |
-| `#host` | capture_sump.py, index (host-scripts) |
+| `#host` | index (host-scripts) |
 | `#dragon` | ssh-setup, hackrf-ops, coordinated |
 | `#build` | kconfig, menuconfig-guide |
 | `#workflow` | development, testing, debugging |

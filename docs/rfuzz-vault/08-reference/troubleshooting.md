@@ -115,7 +115,7 @@ addr2line -pfiaC -e build/RFuzz.elf <addresses>
 ## SUMP Capture Issues
 
 ### "No SUMP Device Found"
-**Symptoms**: `capture_sump.py` exits with "No SUMP device found"
+**Symptoms**: "No SUMP device found"
 
 | Cause | Fix |
 |-------|-----|
@@ -160,7 +160,7 @@ for _ in range(5):
 | Firmware not sampling | Check GDO pins, timer init |
 | Transport stalled | USB buffer full, increase `USB_INTERFACE_USJ_TX_BUFFER_SIZE` |
 
-**Timeout Formula** (capture.py):
+**Timeout Formula**:
 ```python
 timeout = max(30.0, (count / rate) * 2.5 + 5.0)
 ```
@@ -383,5 +383,5 @@ troubleshooting:
 - [[07-workflow/debugging|Debugging Guide]]
 - [[07-workflow/development|Development Workflow]]
 - [[05-dragon-os/ssh-setup|Dragon OS SSH Setup]]
-- [[04-host-scripts/capture_sump.py|SUMP Capture Script]]
+- [[04-host-scripts/index|Host Scripts]]
 - [[02-firmware/cc1101-driver|CC1101 Driver API]]

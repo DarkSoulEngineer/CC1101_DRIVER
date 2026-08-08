@@ -36,7 +36,7 @@ modulation is selected with --mod:
   ask   carrier at IF, full amplitude for bit 1, silent for bit 0 (OOK).
 
 By default the synth reproduces the source signal's deviation (--fsk-dev,
-default 50000 Hz, matching gen_2fsk.py / rfuzz_tools DEFAULT_DEV): the two
+default 50000 Hz, matching rfuzz_tools DEFAULT_DEV): the two
 tones sit at IF +- dev, with IF auto-chosen so both fit the capture band
 (IF = 22.5% of the real rate -> 56250 Hz at the default 250000 Hz capture,
 tones 6250 Hz / 106250 Hz, the true +-50 kHz deviation). If the requested
