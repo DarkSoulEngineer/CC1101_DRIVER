@@ -1,29 +1,160 @@
-# Native CC1101 ESP-IDF Driver
+# CC1101_DRIVER
+**A handle-based ESP-IDF C driver for the TI CC1101 sub-1 GHz RF transceiver, shipped with RFuzz dual-radio link validation on ESP32-S3.**
 
-A zero-dependency, professional-grade driver for the Texas Instruments CC1101 sub-1 GHz RF transceiver. Engineered exclusively for the ESP-IDF SDK, this framework provides deterministic execution, thread-safe SPI management, and uncompromising physical layer (PHY) control for high-performance ESP32 applications.
+[![License](https://img.shields.io/github/license/DarkSoulEngineer/CC1101_DRIVER)](LICENSE)
+![Language](https://img.shields.io/badge/language-C-blue)
+![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v6.1-red)
 
----
+## Table of Contents
 
-## Core Architecture
+- [Description](#description)
+  - [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [API Overview](#api-overview)
+  - [Receive and Transmit Examples](#receive-and-transmit-examples)
+  - [Running the RFuzz Demos](#running-the-rfuzz-demos)
+- [Hardware Interfacing](#hardware-interfacing)
+- [License](#license)
 
-Built from the ground up to bridge high-level usability with professional register-level granularity.
+## Description
 
-- **Handle-Based Routing:** Supports multiple CC1101 modules on independent buses using isolated device handles (`cc1101_handle_t`).
-- **SDK Native Integration:** Leverages native ESP-IDF SPI Master drivers for DMA-accelerated burst transfers, avoiding the overhead of generic platform wrappers.
-- **Dual-Layer API:** Developers can seamlessly switch between abstracted helper functions and raw, unprotected register access.
+CC1101_DRIVER is an ESP-IDF component for the Texas Instruments CC1101 sub-1 GHz RF transceiver, written in C. It wraps the CC1101 register interface and command strobes in a handle-based API so one application can address one or more radios over SPI, and it exposes runtime control of frequency, channel, data rate, TX power, and packet length. RFuzz initializes two radios on an ESP32-S3: Radio A transmits a periodic test packet and Radio B validates its payload and CRC.
 
----
+The driver targets the CC1101 bands at 300–348 MHz, 387–464 MHz, and 779–928 MHz. `cc1101_set_frequency` programs the FREQ2/FREQ1/FREQ0 registers from a target frequency in Hz against the 26 MHz crystal. `cc1101_config` applies a 433.92 MHz OOK packet-mode baseline at approximately 38.4 kbps, with 30/32 sync detection and CRC enabled. See the [default radio profile](#default-radio-profile) for power and regulatory limitations.
 
-## PHY-Layer Capabilities
+### Features
 
-The library exposes the full analog state machine of the CC1101, enabling precise modulation tweaks and timing-critical packet manipulation.
+- **Handle-based API**: `cc1101_handle_t` binds a CC1101 to an ESP-IDF SPI device plus its chip-select, MISO, and GDO0 pins, allowing multiple modules to coexist.
+- **Full register access**: `cc1101.h` defines the complete CC1101 configuration register map, command strobes (`CC1101_SIDLE`, `CC1101_STX`, `CC1101_SRX`, and others), status registers, and MDMCFG builder macros.
+- **Runtime control**: `cc1101_set_frequency`, `cc1101_set_channel`, `cc1101_set_datarate`, `cc1101_set_tx_power`, and `cc1101_set_tx_len`.
+- **Packet engine**: variable-length packets with CRC (`CC1101_CRC_ENABLE | CC1101_PKT_VARIABLE`), optional address checking, and two status bytes appended to the RX FIFO.
+- **RX and TX paths**: `cc1101_receive_packet` reads a length-prefixed packet from the FIFO and reports CRC validity; `cc1101_transmit` frames the payload with a length byte, flushes the TX FIFO, and issues the STX strobe.
+- **Data rates** from 0.6 to 600 kbps; `cc1101_set_datarate` selects the MDMCFG4 exponent and MDMCFG3 mantissa for a requested baud.
+- **Modulation formats** defined in `cc1101.h`: 2-FSK, GFSK, ASK/OOK, 4-FSK, and MSK.
+- **Frequency presets** for 433.92 MHz, 868.3 MHz, and 915.0 MHz (`CC1101_FREQ_433_92_x`, `CC1101_FREQ_868_3_x`, `CC1101_FREQ_915_0_x`).
+- **Register dump helper**: `cc1101_dump_registers` logs the configuration register space plus PARTNUM, VERSION, and MARCSTATE.
+- **Hardware init component**: `hw_init` sets up shared SPI3_HOST over `SPI_DMA_CH_AUTO`, separate software CS lines, dual GDO0 interrupts, and a bus mutex.
+- **RFuzz application**: `main/main.c` imports `rfuzz_tx.c` and `rfuzz_rx.c` in one translation unit, with a shared link profile and packet/error counters.
 
-- **Frequency Agility:** Full support for 300-348 MHz, 387-464 MHz, and 779-928 MHz ISM bands (programmable in 1 Hz steps).
-- **Baud Rates:** Configurable symbol rates from 0.6 kbps up to 600 kbps.
-- **Modulation Matrix:** Native support for OOK, ASK, 2-FSK, 4-FSK, GFSK, and MSK formats.
-- **Asynchronous Interrupts:** Granular GPIO interrupt binding for GDO0/GDO2, achieving 240μs Wake-to-TX transitions.
+## Requirements
 
----
+- **ESP-IDF v6.1**, used for the validated build. The components require `esp_driver_spi` and `esp_driver_gpio`.
+- **ESP32-S3 target**. `sdkconfig` sets `CONFIG_IDF_TARGET="esp32s3"` and a 2 MB flash image size. The tested board reports 16 MB physical flash; firmware currently uses the configured 2 MB layout.
+- **Two CC1101 modules** wired to the ESP32-S3 over SPI (see [Hardware Interfacing](#hardware-interfacing)).
+- The root `idf_component.yml` declares the registry dependency `nopnop2002/esp-idf-cc1101` version `1.0.0`; the native driver lives in `components/cc1101`.
+
+## Installation
+
+1. Clone the repository:
+
+   ```bash
+   git clone https://github.com/DarkSoulEngineer/CC1101_DRIVER.git
+   cd CC1101_DRIVER
+   ```
+
+2. Ensure the ESP-IDF environment is exported (`IDF_PATH` set), then set the target and build:
+
+   ```bash
+   idf.py set-target esp32s3
+   idf.py build
+   ```
+
+3. Flash and monitor (adjust the port for your system):
+
+   ```bash
+   idf.py -p /dev/ttyUSB0 flash monitor
+   ```
+
+The driver itself lives in `components/cc1101` and the board bring-up in `components/hw_init`. To reuse the driver in another project, copy the `components/cc1101` directory into that project's `components/` folder.
+
+## Usage
+
+### API Overview
+
+The public API is declared in `components/cc1101/include/cc1101.h`.
+
+| Function | Description |
+|----------|-------------|
+| `cc1101_init` | Binds a handle to an SPI device and the CS, MISO, and GDO0 pins, then resets the radio. |
+| `cc1101_reset` | Issues the SRES strobe and waits for the radio to settle. |
+| `cc1101_config` | Applies a baseline register configuration. |
+| `cc1101_set_frequency` | Sets the carrier frequency in Hz (writes FREQ2/1/0). |
+| `cc1101_set_channel` | Writes CHANNR. |
+| `cc1101_set_datarate` | Sets the symbol rate in baud (writes MDMCFG4/MDMCFG3). |
+| `cc1101_set_tx_power` | Configures PATABLE and PA index for the active modulation; OOK uses off/on entries. |
+| `cc1101_set_tx_len` | Writes PKTLEN for fixed-length mode. |
+| `cc1101_set_tx_mode` | SIDLE then SFTX. |
+| `cc1101_set_rx_mode` | SIDLE, SFRX, then SRX. |
+| `cc1101_transmit` | Frames and sends a payload up to `CC1101_MAX_PAYLOAD_LEN` bytes. |
+| `cc1101_receive_packet` | Reads a packet from the RX FIFO; returns the payload and CRC status. |
+| `cc1101_poll_packet` | Reports a consumed frame separately from its hardware CRC outcome, including failed-CRC frames. |
+| `cc1101_read_status_reg` | Reads a status register (for example `CC1101_PARTNUM`). |
+| `cc1101_strobe` | Sends a command strobe and returns the status byte. |
+| `cc1101_dump_registers` | Logs the configuration registers and key status values. |
+
+### Receive and Transmit Examples
+
+Minimal Radio B initialization and single-packet receive check (error handling omitted):
+
+```c
+#include "hw_init.h"
+#include "cc1101.h"
+
+void app_main(void)
+{
+    cc1101_handle_t radio;
+
+    init_hardware();  // Shared SPI3_HOST + dual GDO0 interrupts
+
+    cc1101_init(&radio,
+                cc1101_handle,   // spi_device_handle_t from hw_init
+                PIN_NUM_CS_B,    // GPIO10
+                PIN_NUM_MISO,    // GPIO13
+                PIN_NUM_GDO0_B); // GPIO5
+
+    uint8_t partnum = cc1101_read_status_reg(&radio, CC1101_PARTNUM);
+    uint8_t version = cc1101_read_status_reg(&radio, CC1101_VERSION);
+
+    cc1101_config(&radio);
+    cc1101_set_frequency(&radio, 433920000);  // Hz
+    cc1101_set_channel(&radio, 0);
+    cc1101_set_datarate(&radio, 38400);       // baud
+    cc1101_set_rx_mode(&radio);
+
+    uint8_t buffer[CC1101_MAX_PACKET_LEN];
+    size_t len = sizeof(buffer);
+
+    if (cc1101_receive_packet(&radio, buffer, &len))
+    {
+        // len bytes were read into buffer and passed CRC
+    }
+}
+```
+
+Transmit using an initialized Radio A handle (CS GPIO9, GDO0 GPIO4):
+
+```c
+uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF};
+
+cc1101_set_tx_power(&radio, CC1101_DEFAULT_PA_433_MHZ); // Nominal +7 dBm, not guaranteed ERP
+cc1101_transmit(&radio, payload, sizeof(payload));
+```
+
+### Running the RFuzz Demos
+
+`main/CMakeLists.txt` compiles a single source file:
+
+```cmake
+idf_component_register(SRCS "main.c"
+                    INCLUDE_DIRS "."
+                    REQUIRES hw_init cc1101 freertos log esp_timer)
+```
+
+Keep `main.c` as the entry point: it imports both lowercase `rfuzz_tx.c` and `rfuzz_rx.c`; they are not standalone applications. Radio A sends `DE AD BE EF`, waits up to 100 ms for `tx_done_sem_a`, and Radio B checks the received packet within a 250 ms window. Each completed iteration is followed by a 5000 ms delay. Logs report TX confirmation, matching payloads, CRC failures, corruption, and misses.
+
+A bounded 40-second hardware run with the C8 profile booted successfully, identified both radios (`PARTNUM=00 VERSION=14`), and observed eight matching CRC-valid packets with no misses. This validates that packet link only, not RF power or regulatory compliance.
 
 ## Hardware Interfacing
 
@@ -73,23 +204,8 @@ The driver relies on the host application to initialize the physical SPI bus, en
 | **CSN B**  | `PIN_NUM_CS_B` (10)   | Chip Select - Radio B (RX/target)   |
 | **GDO0 B** | `PIN_NUM_GDO0_B` (5)  | Interrupt - Radio B (RX/sync)       |
 
----
+Pin definitions are in `components/hw_init/include/hw_init.h`. The bus is initialized on `SPI3_HOST` with `SPI_DMA_CH_AUTO`, 1 MHz mode 0, and a maximum transfer size of 256 bytes. Chip select is not handled by the SPI peripheral; `cc1101.c` raises and lowers each CS pin directly around transactions, polling MISO for readiness. Both GDO0 interrupts use negative edges. GDO2 is not wired; `CC1101_IOCFG2` is configured as a sync-word output.
 
-## The Dual-Layer API Strategy
+## License
 
-### 1. High-Level Abstraction Layer
-
-Automates complex state transitions (IDLE -> Flush -> Load FIFO -> STX) and register calculations.
-
-```c
-// Bind handle to SPI bus
-cc1101_init(&radio, spi_handle, PIN_CS, PIN_MISO, PIN_GDO0);
-
-// High-level parameter configuration
-cc1101_config(&radio);
-cc1101_set_frequency(&radio, 433920000);
-cc1101_set_datarate(&radio, 38400);
-
-// Automated transmission lifecycle
-cc1101_transmit(&radio, payload, length);
-```
+MIT. See [LICENSE](LICENSE).
