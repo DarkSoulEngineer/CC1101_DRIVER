@@ -232,13 +232,28 @@ void cc1101_config(cc1101_handle_t *dev)
     cc1101_write_reg(dev, CC1101_MDMCFG2,
                      CC1101_MDMCFG2_VALUE(
                          0,
-                         CC1101_MOD_GFSK,
+                          CC1101_MOD_ASK_OOK,
                          0,
                          CC1101_SYNC_30_32));
     cc1101_write_reg(dev, CC1101_MDMCFG1,
                      CC1101_MDMCFG1_VALUE(0, 2, 2));
     cc1101_write_reg(dev, CC1101_MDMCFG0,
                      CC1101_MDMCFG0_VALUE(248));
+
+    /* OOK requires FOC_LIMIT=0; retain all other frequency-offset settings. */
+    uint8_t foccfg = cc1101_read_reg(dev, CC1101_FOCCFG);
+    cc1101_write_reg(dev, CC1101_FOCCFG,
+                     foccfg & ~CC1101_FOCCFG_FOC_LIMIT_MASK);
+
+    /* TI DN022 OOK starting profile: hardware tuning is still required.
+     * Keep the existing ~38.4 kbps / 101.5625 kHz rate/bandwidth settings.
+     * FREND1 retains reset 0xB6, suitable for bandwidths above 101 kHz. */
+    cc1101_write_reg(dev, CC1101_AGCCTRL2, 0x03);
+    cc1101_write_reg(dev, CC1101_AGCCTRL1, 0x00);
+    cc1101_write_reg(dev, CC1101_AGCCTRL0, 0x91);
+
+    /* Configure both radios at nominal +7 dBm; actual ERP needs measurement. */
+    cc1101_set_tx_power(dev, CC1101_DEFAULT_PA_433_MHZ);
 
     cc1101_write_reg(dev, CC1101_MCSM0,
                      CC1101_AUTOCAL_IDLE_TO_RXTX);
@@ -313,9 +328,10 @@ void cc1101_set_rx_mode(cc1101_handle_t *dev)
     cc1101_strobe(dev, CC1101_SRX);
 }
 
-bool cc1101_receive_packet(cc1101_handle_t *dev,
-                           uint8_t *buffer,
-                           size_t *len)
+bool cc1101_poll_packet(cc1101_handle_t *dev,
+                        uint8_t *buffer,
+                        size_t *len,
+                        bool *crc_ok)
 {
     uint8_t rx_bytes = cc1101_read_status(dev, CC1101_RXBYTES);
 
@@ -329,7 +345,7 @@ bool cc1101_receive_packet(cc1101_handle_t *dev,
     if ((rx_bytes & 0x7F) == 0)
         return false;
 
-    if (buffer == NULL || len == NULL)
+    if (buffer == NULL || len == NULL || crc_ok == NULL)
     {
         ESP_LOGE(TAG, "Invalid RX args");
         return false;
@@ -356,7 +372,20 @@ bool cc1101_receive_packet(cc1101_handle_t *dev,
 
     cc1101_set_rx_mode(dev);
 
-    return (status[1] & 0x80) != 0;
+    *crc_ok = (status[1] & 0x80) != 0;
+    return true;
+}
+
+bool cc1101_receive_packet(cc1101_handle_t *dev,
+                           uint8_t *buffer,
+                           size_t *len)
+{
+    bool crc_ok = false;
+
+    if (cc1101_poll_packet(dev, buffer, len, &crc_ok))
+        return crc_ok;
+
+    return false;
 }
 
 uint8_t cc1101_read_status_reg(cc1101_handle_t *dev, uint8_t reg)
@@ -388,7 +417,25 @@ esp_err_t cc1101_set_channel(cc1101_handle_t *dev, uint8_t channel)
 
 esp_err_t cc1101_set_tx_power(cc1101_handle_t *dev, uint8_t pa_value)
 {
-    cc1101_write_burst(dev, CC1101_PATABLE, &pa_value, 1);
+    uint8_t modulation = cc1101_read_reg(dev, CC1101_MDMCFG2) &
+                         CC1101_MDMCFG2_MOD_FORMAT_MASK;
+    uint8_t frend0 = cc1101_read_reg(dev, CC1101_FREND0) &
+                     ~CC1101_FREND0_PA_POWER_MASK;
+
+    if (modulation == (CC1101_MOD_ASK_OOK << 4))
+    {
+        /* One ordered burst: index 0 is off, index 1 is the OOK on level. */
+        const uint8_t pa_table[] = {0x00, pa_value};
+        cc1101_write_burst(dev, CC1101_PATABLE, pa_table, sizeof(pa_table));
+        frend0 |= 1;
+    }
+    else
+    {
+        cc1101_write_burst(dev, CC1101_PATABLE, &pa_value, 1);
+    }
+
+    /* Preserve the front-end configuration outside the PA table index. */
+    cc1101_write_reg(dev, CC1101_FREND0, frend0);
     return ESP_OK;
 }
 

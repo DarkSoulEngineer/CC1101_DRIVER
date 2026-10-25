@@ -157,6 +157,13 @@
 #define CC1101_MOD_4FSK               4
 #define CC1101_MOD_MSK                7
 
+#define CC1101_MDMCFG2_MOD_FORMAT_MASK 0x70
+#define CC1101_FOCCFG_FOC_LIMIT_MASK   0x03
+#define CC1101_FREND0_PA_POWER_MASK    0x07
+
+/* TI 433 MHz nominal +7 dBm (~5 mW) conducted; not a guaranteed ERP. */
+#define CC1101_DEFAULT_PA_433_MHZ      0xC8
+
 /* ============================================================
  * SYNC MODES
  * ============================================================ */
@@ -234,6 +241,7 @@ typedef struct {
  * ============================================================ */
 esp_err_t cc1101_set_frequency(cc1101_handle_t *dev, uint32_t freq_hz);
 esp_err_t cc1101_set_channel(cc1101_handle_t *dev, uint8_t channel);
+/* OOK: PATABLE {off=0, on=pa_value}, PA_POWER=1; otherwise entry/index 0. */
 esp_err_t cc1101_set_tx_power(cc1101_handle_t *dev, uint8_t pa_value);
 esp_err_t cc1101_set_datarate(cc1101_handle_t *dev, uint32_t baud);
 esp_err_t cc1101_set_tx_len(cc1101_handle_t *dev, uint8_t len);
@@ -255,6 +263,18 @@ void cc1101_transmit(cc1101_handle_t *dev, uint8_t *data, size_t len);
 void cc1101_set_tx_mode(cc1101_handle_t *dev);
 void cc1101_set_rx_mode(cc1101_handle_t *dev);
 bool cc1101_receive_packet(cc1101_handle_t *dev, uint8_t *buffer, size_t *len);
+
+/**
+ * @brief Consume one packet if present; *crc_ok reports FCS outcome.
+ *
+ * Unlike cc1101_receive_packet(), a frame that failed the hardware CRC check
+ * is reported (true + *crc_ok=false) instead of collapsing to "nothing".
+ * The FIFO is already flushed and the radio re-armed in both cases.
+ */
+bool cc1101_poll_packet(cc1101_handle_t *dev,
+                        uint8_t *buffer,
+                        size_t *len,
+                        bool *crc_ok);
 uint8_t cc1101_read_status_reg(cc1101_handle_t *dev, uint8_t reg);
 uint8_t cc1101_strobe(cc1101_handle_t *dev, uint8_t strobe);
 

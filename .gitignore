@@ -1,6 +1,9 @@
 # =========================
 # ESP-IDF Specifics
 # =========================
+.omo/
+.codegraph/
+.vscode/
 build/
 sdkconfig.old
 managed_components/
