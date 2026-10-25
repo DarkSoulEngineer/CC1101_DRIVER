@@ -29,7 +29,8 @@ typedef struct {
 } rfuzz_tx_result_t;
 
 esp_err_t rfuzz_tx_init(void);
-esp_err_t rfuzz_tx_send(const uint8_t *payload, size_t len, rfuzz_tx_result_t *result);
+esp_err_t rfuzz_tx_send(const uint8_t *payload, size_t len, rfuzz_tx_result_t *result,
+                        void (*service)(void));
 
 /* ============================================================
  * IMPLEMENTATION (private to module)
@@ -55,7 +56,8 @@ esp_err_t rfuzz_tx_init(void)
     return ESP_OK;
 }
 
-esp_err_t rfuzz_tx_send(const uint8_t *payload, size_t len, rfuzz_tx_result_t *result)
+esp_err_t rfuzz_tx_send(const uint8_t *payload, size_t len, rfuzz_tx_result_t *result,
+                        void (*service)(void))
 {
     int64_t t0, t1;
 
@@ -72,7 +74,14 @@ esp_err_t rfuzz_tx_send(const uint8_t *payload, size_t len, rfuzz_tx_result_t *r
     xSemaphoreGive(cc1101_bus_mutex);
     t1 = esp_timer_get_time();
 
-    if (xSemaphoreTake(tx_done_sem_a, pdMS_TO_TICKS(TX_GDO0_TIMEOUT_MS)) == pdTRUE)
+    bool done = false;
+    int64_t deadline = t1 + TX_GDO0_TIMEOUT_MS * 1000;
+    do {
+        if (service) service();
+        done = xSemaphoreTake(tx_done_sem_a, pdMS_TO_TICKS(10)) == pdTRUE;
+    } while (!done && esp_timer_get_time() < deadline);
+    if (service) service();
+    if (done)
     {
         int64_t t2 = esp_timer_get_time();
 

@@ -1,6 +1,7 @@
 #include "cc1101.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -326,6 +327,57 @@ void cc1101_set_rx_mode(cc1101_handle_t *dev)
     cc1101_strobe(dev, CC1101_SIDLE);
     cc1101_strobe(dev, CC1101_SFRX);
     cc1101_strobe(dev, CC1101_SRX);
+}
+
+void cc1101_get_rx_format_status(cc1101_handle_t *dev, cc1101_rx_format_status_t *status)
+{
+    status->pktctrl0 = cc1101_read_reg(dev, CC1101_PKTCTRL0);
+    status->mdmcfg2 = cc1101_read_reg(dev, CC1101_MDMCFG2);
+    status->iocfg0 = cc1101_read_reg(dev, CC1101_IOCFG0);
+    status->marcstate = cc1101_read_status(dev, CC1101_MARCSTATE) & 0x1F;
+}
+
+static esp_err_t cc1101_wait_state(cc1101_handle_t *dev, uint8_t state)
+{
+    int64_t deadline = esp_timer_get_time() + 20000;
+    do {
+        if ((cc1101_read_status(dev, CC1101_MARCSTATE) & 0x1F) == state)
+            return ESP_OK;
+        vTaskDelay(1);
+    } while (esp_timer_get_time() < deadline);
+    return ESP_ERR_TIMEOUT;
+}
+
+esp_err_t cc1101_set_rx_format(cc1101_handle_t *dev, cc1101_rx_format_t format)
+{
+    if (format != CC1101_RX_PACKET && format != CC1101_RX_RAW_OOK)
+        return ESP_ERR_INVALID_ARG;
+
+    cc1101_strobe(dev, CC1101_SIDLE);
+    esp_err_t err = cc1101_wait_state(dev, 0x01);
+    if (err != ESP_OK)
+        return err; /* Do not flush a potentially live receiver. */
+    cc1101_strobe(dev, CC1101_SFRX);
+
+    bool raw = format == CC1101_RX_RAW_OOK;
+    uint8_t pktctrl0 = raw ? 0x30 : 0x05;
+    uint8_t mdmcfg2 = raw ? 0x30 : 0x33;
+    uint8_t iocfg0 = raw ? 0x0D : CC1101_GDO_SYNC_WORD;
+    cc1101_write_reg(dev, CC1101_PKTCTRL0, pktctrl0);
+    cc1101_write_reg(dev, CC1101_MDMCFG2, mdmcfg2);
+    cc1101_write_reg(dev, CC1101_IOCFG0, iocfg0);
+
+    cc1101_rx_format_status_t actual;
+    cc1101_get_rx_format_status(dev, &actual);
+    if (actual.pktctrl0 != pktctrl0 || actual.mdmcfg2 != mdmcfg2 ||
+        actual.iocfg0 != iocfg0)
+        return ESP_FAIL; /* Remain IDLE, application marks applied mode invalid. */
+
+    cc1101_strobe(dev, CC1101_SRX);
+    err = cc1101_wait_state(dev, 0x0D);
+    if (err != ESP_OK)
+        cc1101_strobe(dev, CC1101_SIDLE);
+    return err;
 }
 
 bool cc1101_poll_packet(cc1101_handle_t *dev,

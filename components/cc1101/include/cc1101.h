@@ -262,6 +262,22 @@ void cc1101_config(cc1101_handle_t *dev);
 void cc1101_transmit(cc1101_handle_t *dev, uint8_t *data, size_t len);
 void cc1101_set_tx_mode(cc1101_handle_t *dev);
 void cc1101_set_rx_mode(cc1101_handle_t *dev);
+typedef enum {
+    CC1101_RX_PACKET = 0,
+    CC1101_RX_RAW_OOK
+} cc1101_rx_format_t;
+
+typedef struct {
+    uint8_t pktctrl0;
+    uint8_t mdmcfg2;
+    uint8_t iocfg0;
+    uint8_t marcstate;
+} cc1101_rx_format_status_t;
+
+/* Caller owns bus lock and disables the associated GDO interrupt.
+ * Failure does not arm RX; never flushes unless IDLE was confirmed. */
+esp_err_t cc1101_set_rx_format(cc1101_handle_t *dev, cc1101_rx_format_t format);
+void cc1101_get_rx_format_status(cc1101_handle_t *dev, cc1101_rx_format_status_t *status);
 bool cc1101_receive_packet(cc1101_handle_t *dev, uint8_t *buffer, size_t *len);
 
 /**

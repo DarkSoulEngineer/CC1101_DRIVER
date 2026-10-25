@@ -10,6 +10,9 @@
  */
 #include <stdio.h>
 #include <stdint.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include "rfuzz_console.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -84,6 +87,36 @@ static void hang_on_error(const char *what)
     while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
 }
 
+static void rfuzz_console_poll(void)
+{
+    static rfuzz_console_t parser;
+    /* One reader/owner, bounded work even with a flooded UART. */
+    for (unsigned i = 0; i < 64; i++) {
+        unsigned char c;
+        if (read(STDIN_FILENO, &c, 1) != 1) break;
+        rfuzz_command_t command = rfuzz_console_feed(&parser, c);
+        switch (command) {
+        case RFUZZ_CMD_HELP:
+            ESP_LOGI(TAG, "commands: help | status | rx packet | rx raw (CR/LF); raw is digital demodulated OOK, not IQ/decoded bits");
+            break;
+        case RFUZZ_CMD_STATUS: rfuzz_rx_status(); break;
+        case RFUZZ_CMD_PACKET: rfuzz_rx_select(CC1101_RX_PACKET); break;
+        case RFUZZ_CMD_RAW: rfuzz_rx_select(CC1101_RX_RAW_OOK); break;
+        case RFUZZ_CMD_UNKNOWN: ESP_LOGW(TAG, "unknown command; use help"); break;
+        case RFUZZ_CMD_TOO_LONG: ESP_LOGW(TAG, "line too long/invalid; discarded"); break;
+        default: break;
+        }
+        /* At most one completed command per poll: bound status/log traffic. */
+        if (command != RFUZZ_CMD_NONE) break;
+    }
+}
+
+static void rfuzz_background_poll(void)
+{
+    rfuzz_console_poll();
+    rfuzz_rx_raw_service();
+}
+
 void app_main(void)
 {
     uint32_t iter = 0;
@@ -104,16 +137,36 @@ void app_main(void)
     if (rfuzz_rx_init() != ESP_OK)
         hang_on_error("RX module init");
 
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    if (flags < 0 || fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) < 0)
+        hang_on_error("nonblocking console setup");
+    ESP_LOGI(TAG, "UART0 115200: help | status | rx packet | rx raw; startup=packet");
+    int64_t next_tx_us = esp_timer_get_time();
+
     while (1)
     {
+        rfuzz_console_poll();
+        rfuzz_rx_raw_service();
+        if (esp_timer_get_time() < next_tx_us) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
         rfuzz_tx_result_t txr;
         rfuzz_rx_report_t rxr;
 
         iter++;
 
-        if (rfuzz_tx_send(GOLDEN_PAYLOAD, GOLDEN_LEN, &txr) != ESP_OK)
+        rfuzz_rx_raw_service(); /* B is already armed before starting A. */
+        esp_err_t tx_err = rfuzz_tx_send(GOLDEN_PAYLOAD, GOLDEN_LEN, &txr,
+                                        rfuzz_rx_is_raw() ? rfuzz_background_poll : NULL);
+        /* Completion-based deadline guarantees at least five seconds between
+         * actual transmissions, including variable console/bus latency. */
+        next_tx_us = esp_timer_get_time() + (int64_t)ITER_INTERVAL_MS * 1000;
+        if (tx_err != ESP_OK)
             continue;
 
+        rfuzz_rx_raw_service();
+        if (!rfuzz_rx_is_packet()) continue; /* No FIFO/CRC accounting in raw/stopped. */
         rfuzz_rx_wait_window(RX_WINDOW_MS, GOLDEN_PAYLOAD, GOLDEN_LEN, &rxr);
 
         switch (rxr.result)
@@ -167,6 +220,6 @@ void app_main(void)
             break;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(ITER_INTERVAL_MS));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

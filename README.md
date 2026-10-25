@@ -16,6 +16,7 @@
   - [Receive and Transmit Examples](#receive-and-transmit-examples)
   - [Running the RFuzz Demos](#running-the-rfuzz-demos)
 - [Hardware Interfacing](#hardware-interfacing)
+- [Staged Roadmap](#staged-roadmap)
 - [License](#license)
 
 ## Description
@@ -156,14 +157,34 @@ Keep `main.c` as the entry point: it imports both lowercase `rfuzz_tx.c` and `rf
 
 A bounded 40-second hardware run with the C8 profile booted successfully, identified both radios (`PARTNUM=00 VERSION=14`), and observed eight matching CRC-valid packets with no misses. This validates that packet link only, not RF power or regulatory compliance.
 
+#### Receive-mode console selector
+
+The current change is limited to selecting Radio B's receive path; broader serial configuration is **planned, not implemented**. Selector commands (newline-terminated) use the existing **UART0 console at 115200 baud**, through the CH343 adapter. `COM14` is typical on this development machine only; confirm your own port. One console reader passes requests to the main application's mode owner; do not run competing serial consumers.
+
+| Command | Purpose |
+|---------|---------|
+| `help` | List supported commands. |
+| `status` | Report current receive mode/status. |
+| `rx packet` | Select the default packet receiver, retaining the golden four-byte `DE AD BE EF` payload checks and hardware CRC. |
+| `rx raw` | Select asynchronous digital OOK on Radio B's existing GDO0 (GPIO5), reporting bounded level-duration batches and drop counts. |
+
+Raw output is **not IQ or analog sampling**, is not guaranteed lossless, and is not automatically decoded into bits. Radio A continues its original packet transmission approximately every five seconds even while B receives raw OOK; a receive-only TX pause is **not implemented**. Returning to packet mode must restore the packet profile and receive interrupt behavior.
+
+The selector passed an ESP-IDF v6.1 build, host tests of the C command parser, and mocked driver transition/failure-path tests. After authorized flashing to the ESP32-S3 through CH343 on COM14, a bounded hardware run exercised three raw-to-packet restoration cycles. Status readbacks matched raw `PKTCTRL0/MDMCFG2/IOCFG0=30/30/0D` and packet `05/33/06`, with `MARCSTATE=0D`; eight matching CRC-good golden packets were observed, including at least two after each restoration. Commands remained responsive during raw capture, invalid/oversized input was rejected safely, and observed TX intervals remained at least five seconds. No application error, panic, watchdog reset, or visible heap-failure symptom was observed during this run.
+
+Raw batches and sample-drop counter/reset behavior were observed, but accurate raw timing, losslessness, ring-overflow/backpressure stress behavior, and RF power/compliance were **not validated**. Ring overflow and observed-edge-drop counters stayed zero in this test; omitted samples and potentially missed ISR edges must not be interpreted as a complete waveform. The future configuration controls below remain planned, not implemented. Further flashing or additional RF activity requires explicit approval.
+
 ## Hardware Interfacing
 
 ### Default radio profile
 
-Both radios use **OOK packet mode** at 433.92 MHz and approximately 38.4 kbps,
+At startup both radios use **OOK packet mode** at 433.92 MHz and approximately 38.4 kbps
+(approximately 38.383 kbps after register quantization),
 with the existing 101.5625 kHz RX bandwidth (26 MHz crystal). This is not raw
 GPIO/asynchronous OOK: FIFO framing, preamble, sync, variable-length packets,
-hardware CRC, and appended RX status remain unchanged.
+hardware CRC, and appended RX status remain unchanged in the default packet path.
+The receive selector changes only Radio B to raw asynchronous OOK when requested;
+it does not change Radio A's packet transmitter.
 
 The OOK configuration uses `MDMCFG2=0x33`, clears `FOCCFG.FOC_LIMIT`, and starts
 RX AGC at `AGCCTRL2/1/0=0x03/0x00/0x91` (TI DN022 starting profile).
@@ -204,7 +225,18 @@ The driver relies on the host application to initialize the physical SPI bus, en
 | **CSN B**  | `PIN_NUM_CS_B` (10)   | Chip Select - Radio B (RX/target)   |
 | **GDO0 B** | `PIN_NUM_GDO0_B` (5)  | Interrupt - Radio B (RX/sync)       |
 
-Pin definitions are in `components/hw_init/include/hw_init.h`. The bus is initialized on `SPI3_HOST` with `SPI_DMA_CH_AUTO`, 1 MHz mode 0, and a maximum transfer size of 256 bytes. Chip select is not handled by the SPI peripheral; `cc1101.c` raises and lowers each CS pin directly around transactions, polling MISO for readiness. Both GDO0 interrupts use negative edges. GDO2 is not wired; `CC1101_IOCFG2` is configured as a sync-word output.
+Pin definitions are in `components/hw_init/include/hw_init.h`. The bus is initialized on `SPI3_HOST` with `SPI_DMA_CH_AUTO`, 1 MHz mode 0, and a maximum transfer size of 256 bytes. Chip select is not handled by the SPI peripheral; `cc1101.c` raises and lowers each CS pin directly around transactions, polling MISO for readiness. Both GDO0 interrupts use negative edges in packet mode; raw capture requires both edges on B and restoration of the packet interrupt configuration afterward. GDO2 is not wired; `CC1101_IOCFG2` is configured as a sync-word output.
+
+## Staged Roadmap
+
+Only the packet/raw receive selector is in the current implementation scope; completion requires source and verification evidence. The following are **future work, not implemented serial commands**:
+
+1. Validated modulation profiles and coordinated data-rate, RX-bandwidth, and deviation controls, rejecting unsupported combinations rather than exposing arbitrary invalid settings.
+2. Sync word/detection and preamble-length controls; CRC, whitening, and address-filtering controls with compatible packet framing.
+3. Signal-type and TX-waveform choices, plus a receive-only mode that explicitly pauses Radio A.
+4. Reliable RMT raw capture with measured timing/overflow limits, parser/profile tests, register readbacks, and approved packet/raw transition and hardware tests.
+
+See [AGENTS.md](AGENTS.md) for ownership, ISR safety, verification, and approval boundaries. These plans do not imply hardware validation or RF compliance.
 
 ## License
 
