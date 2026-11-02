@@ -119,6 +119,7 @@ void rfuzz_run(void)
     if (rfuzz_console_init() != ESP_OK)
         hang_on_error("nonblocking console setup");
     ESP_LOGI(TAG, "UART0 @115200 baud. Type 'help' for commands.");
+    ESP_LOGI(TAG, "RX reporting: on. TX: idle (use 'tx start').");
 
     while (1)
     {
