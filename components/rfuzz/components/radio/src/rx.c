@@ -183,8 +183,18 @@ static bool rfuzz_rx_poll(rfuzz_rx_report_t *report)
 void rfuzz_rx_listen_poll(void)
 {
     rfuzz_rx_report_t report = {0};
+    static int64_t s_last_packet_heartbeat_us = 0;
     if (s_rx_paused || rfuzz_console_is_typing()) return;
-    if (!rfuzz_rx_poll(&report)) return;
+    if (!rfuzz_rx_is_packet()) return;
+    if (!rfuzz_rx_poll(&report)) {
+        int64_t now = esp_timer_get_time();
+        if (now - s_last_packet_heartbeat_us >= 5000000) {
+            ESP_LOGI(RX_TAG, "RX: listening for packets...");
+            s_last_packet_heartbeat_us = now;
+        }
+        return;
+    }
+    s_last_packet_heartbeat_us = esp_timer_get_time();
     ESP_LOGI(RX_TAG, "RX external: len=%u  crc=%s  rssi=%.1f dBm  lqi=%d (no golden comparison)",
              (unsigned)report.len, report.result == RFUZZ_RX_VALID ? "OK" : "FAIL",
              report.rssi_dbm, (int)report.lqi);
