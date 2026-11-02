@@ -12,7 +12,8 @@ typedef enum {
     RFUZZ_CMD_MOD_OOK, RFUZZ_CMD_MOD_ASK,
     RFUZZ_CMD_MOD_2FSK, RFUZZ_CMD_MOD_GFSK,
     RFUZZ_CMD_TX_START, RFUZZ_CMD_TX_STOP,
-    RFUZZ_CMD_RX_START, RFUZZ_CMD_RX_STOP
+    RFUZZ_CMD_RX_START, RFUZZ_CMD_RX_STOP,
+    RFUZZ_CMD_DUAL_START, RFUZZ_CMD_DUAL_STOP
 } rfuzz_command_t;
 
 typedef struct {
@@ -73,12 +74,24 @@ static inline rfuzz_command_t rfuzz_console_parse_line(char *line)
             return RFUZZ_CMD_TX_START;
         if (!strcmp(tokens[1], "stop") || !strcmp(tokens[1], "off"))
             return RFUZZ_CMD_TX_STOP;
+    } else if (!strcmp(tokens[0], "rx")) {
+        if (!strcmp(tokens[1], "start") || !strcmp(tokens[1], "on") || !strcmp(tokens[1], "send"))
+            return RFUZZ_CMD_RX_START;
+        if (!strcmp(tokens[1], "stop") || !strcmp(tokens[1], "off"))
+            return RFUZZ_CMD_RX_STOP;
+    } else if (!strcmp(tokens[0], "dual")) {
+        if (!strcmp(tokens[1], "start") || !strcmp(tokens[1], "on"))
+            return RFUZZ_CMD_DUAL_START;
+        if (!strcmp(tokens[1], "stop") || !strcmp(tokens[1], "off"))
+            return RFUZZ_CMD_DUAL_STOP;
     } else if (!strcmp(tokens[0], "start") || !strcmp(tokens[0], "stop")) {
         bool start = !strcmp(tokens[0], "start");
         if (!strcmp(tokens[1], "tx"))
             return start ? RFUZZ_CMD_TX_START : RFUZZ_CMD_TX_STOP;
         if (!strcmp(tokens[1], "rx"))
             return start ? RFUZZ_CMD_RX_START : RFUZZ_CMD_RX_STOP;
+        if (!strcmp(tokens[1], "dual"))
+            return start ? RFUZZ_CMD_DUAL_START : RFUZZ_CMD_DUAL_STOP;
     }
     return RFUZZ_CMD_UNKNOWN;
 }

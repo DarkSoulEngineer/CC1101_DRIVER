@@ -45,10 +45,12 @@ static void rfuzz_apply_console_command(void)
         ESP_LOGI(TAG, "  mode raw                   Radio B raw digital demodulator capture");
         ESP_LOGI(TAG, "  rx packet | raw            Alias for 'mode ...'");
         ESP_LOGI(TAG, "  mod ook | ask | 2fsk | gfsk  Queue coordinated A/B profile (fsk=2fsk)");
-        ESP_LOGI(TAG, "  tx start | send            Transmit one packet on Radio A");
-        ESP_LOGI(TAG, "  tx stop                   Idle Radio A (TX off)");
-        ESP_LOGI(TAG, "  rx start                  Enable RX reporting/listening");
-        ESP_LOGI(TAG, "  rx stop                   Pause RX reporting (radio stays in RX)");
+        ESP_LOGI(TAG, "  start tx | send           Transmit one packet on Radio A");
+        ESP_LOGI(TAG, "  stop tx                   Idle Radio A (TX off)");
+        ESP_LOGI(TAG, "  start rx                  Enable RX reporting/listening");
+        ESP_LOGI(TAG, "  stop rx                   Pause RX reporting (radio stays in RX)");
+        ESP_LOGI(TAG, "  start dual                Start TX + RX together");
+        ESP_LOGI(TAG, "  stop dual                 Stop TX + RX together");
         ESP_LOGI(TAG, "");
         break;
     case RFUZZ_CMD_STATUS:
@@ -91,6 +93,21 @@ static void rfuzz_apply_console_command(void)
     case RFUZZ_CMD_RX_STOP:
         rfuzz_rx_set_paused(true);
         ESP_LOGI(TAG, "RX: reporting paused");
+        break;
+    case RFUZZ_CMD_DUAL_START:
+        rfuzz_rx_set_paused(false);
+        if (rfuzz_tx_send_once() == ESP_OK)
+            ESP_LOGI(TAG, "DUAL: TX sent, RX reporting on");
+        else
+            ESP_LOGW(TAG, "DUAL: RX on, TX send failed");
+        break;
+    case RFUZZ_CMD_DUAL_STOP:
+        rfuzz_rx_set_paused(true);
+        if (xSemaphoreTake(cc1101_bus_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            rfuzz_tx_idle_locked();
+            xSemaphoreGive(cc1101_bus_mutex);
+        }
+        ESP_LOGI(TAG, "DUAL: TX idled, RX reporting paused");
         break;
     case RFUZZ_CMD_UNKNOWN:
         ESP_LOGW(TAG, "Unknown command. Type 'help' for the command list.");
