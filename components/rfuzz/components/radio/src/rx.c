@@ -53,6 +53,8 @@ esp_err_t rfuzz_rx_apply_profile_locked(cc1101_modulation_t modulation,
     if (err == ESP_OK) {
         s_modulation = modulation;
         s_format = format;
+        ESP_LOGI(RX_TAG, "RX: %s mode applied; listening",
+                 format == CC1101_RX_PACKET ? "packet" : "raw");
     }
     return err;
 }
