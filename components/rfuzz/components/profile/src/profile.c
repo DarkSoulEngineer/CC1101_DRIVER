@@ -54,7 +54,7 @@ esp_err_t rfuzz_profile_process(rfuzz_profile_t *s)
         s->pending = false;
         s->apply_both = false;
         s->cleanup_pending = true;
-        ESP_LOGE(TAG, "profile bus timeout; invalid; recover with mod");
+        ESP_LOGE(TAG, "Profile bus timeout; invalid. Recover with 'mod ...'.");
         return ESP_ERR_TIMEOUT;
     }
     if (err == ESP_OK && s->apply_both)
@@ -76,8 +76,12 @@ esp_err_t rfuzz_profile_process(rfuzz_profile_t *s)
     xSemaphoreGive(cc1101_bus_mutex);
     s->pending = false;
     s->apply_both = false;
-    ESP_LOGI(TAG, "transition: %s; valid=%d (failure requires mod recovery)",
-             esp_err_to_name(err), s->valid);
+    if (err == ESP_OK)
+        ESP_LOGI(TAG, "Profile transition OK: valid=%s", s->valid ? "yes" : "no");
+    else {
+        ESP_LOGE(TAG, "Profile transition FAILED: %s (valid=%s)", esp_err_to_name(err), s->valid ? "yes" : "no");
+        ESP_LOGE(TAG, "Capture stopped; A/B set to IDLE (best effort). Recover with 'mod ...'.");
+    }
     return err;
 }
 
@@ -88,7 +92,7 @@ void rfuzz_profile_check(rfuzz_profile_t *s)
         if (!s->apply_both) s->pending = false;
         rfuzz_rx_capture_stop();
         s->cleanup_pending = true;
-        ESP_LOGE(TAG, "capture invalid; recover with mod");
+        ESP_LOGE(TAG, "Capture invalid; recover with 'mod ...'.");
     }
     if (s->cleanup_pending) rfuzz_profile_process(s);
 }
@@ -110,26 +114,36 @@ static void snapshot(const char *name, esp_err_t err, const cc1101_profile_statu
         ESP_LOGW(TAG, "%s actual readback unavailable: %s", name, esp_err_to_name(err));
         return;
     }
-    ESP_LOGI(TAG, "%s actual PKTCTRL0=%02X MDMCFG2=%02X DEVIATN=%02X AGC=%02X/%02X/%02X FOC=%02X FREND0=%02X IOCFG0=%02X MARCSTATE=%02X PA=%02X/%02X/%02X/%02X/%02X/%02X/%02X/%02X",
-             name, p->pktctrl0, p->mdmcfg2, p->deviatn,
-             p->agcctrl2, p->agcctrl1, p->agcctrl0, p->foccfg, p->frend0,
-             p->iocfg0, p->marcstate, p->patable[0], p->patable[1], p->patable[2],
-             p->patable[3], p->patable[4], p->patable[5], p->patable[6], p->patable[7]);
+    ESP_LOGI(TAG, "  %s PKTCTRL0=%02X  MDMCFG2=%02X  DEVIATN=%02X", name, p->pktctrl0, p->mdmcfg2, p->deviatn);
+    ESP_LOGI(TAG, "  %s AGC=%02X/%02X/%02X  FOC=%02X  FREND0=%02X  IOCFG0=%02X  MARCSTATE=%02X",
+             name, p->agcctrl2, p->agcctrl1, p->agcctrl0, p->foccfg, p->frend0, p->iocfg0, p->marcstate);
+    ESP_LOGI(TAG, "  %s PA=%02X %02X %02X %02X %02X %02X %02X %02X",
+             name, p->patable[0], p->patable[1], p->patable[2], p->patable[3],
+             p->patable[4], p->patable[5], p->patable[6], p->patable[7]);
 }
 
 void rfuzz_profile_status(const rfuzz_profile_t *s)
 {
-    ESP_LOGI(TAG, "requested mod=%s mode=%s; last_applied mod=%s mode=%s valid=%d pending=%d cleanup_pending=%d",
-             mod_name(s->requested_mod), s->requested_mode == CC1101_RX_PACKET ? "packet" : "raw",
-             mod_name(s->applied_mod), s->applied_mode == CC1101_RX_PACKET ? "packet" : "raw",
-             s->valid, s->pending, s->cleanup_pending);
+    ESP_LOGI(TAG, "=== Profile state ===");
+    ESP_LOGI(TAG, "  requested: mod=%s  mode=%s",
+             mod_name(s->requested_mod), s->requested_mode == CC1101_RX_PACKET ? "packet" : "raw");
+    ESP_LOGI(TAG, "  applied:   mod=%s  mode=%s",
+             mod_name(s->applied_mod), s->applied_mode == CC1101_RX_PACKET ? "packet" : "raw");
+    ESP_LOGI(TAG, "  valid=%s  pending=%s  cleanup_pending=%s",
+             s->valid ? "yes" : "no", s->pending ? "yes" : "no", s->cleanup_pending ? "yes" : "no");
+    ESP_LOGI(TAG, "");
     if (xSemaphoreTake(cc1101_bus_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
         cc1101_profile_status_t a, b;
         esp_err_t ea = rfuzz_tx_profile_readback_locked(&a);
         esp_err_t eb = rfuzz_rx_profile_readback_locked(&b);
         xSemaphoreGive(cc1101_bus_mutex);
+        ESP_LOGI(TAG, "=== Radio A (TX) actual readback ===");
         snapshot("A", ea, &a);
+        ESP_LOGI(TAG, "=== Radio B (RX) actual readback ===");
         snapshot("B", eb, &b);
-    } else ESP_LOGW(TAG, "A/B actual readbacks unavailable: bus timeout");
+    } else {
+        ESP_LOGW(TAG, "A/B actual readbacks unavailable: bus timeout");
+    }
+    ESP_LOGI(TAG, "");
     rfuzz_rx_status();
 }

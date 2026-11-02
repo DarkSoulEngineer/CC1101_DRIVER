@@ -10,7 +10,9 @@ typedef enum {
     RFUZZ_CMD_NONE, RFUZZ_CMD_HELP, RFUZZ_CMD_STATUS,
     RFUZZ_CMD_PACKET, RFUZZ_CMD_RAW, RFUZZ_CMD_UNKNOWN, RFUZZ_CMD_TOO_LONG,
     RFUZZ_CMD_MOD_OOK, RFUZZ_CMD_MOD_ASK,
-    RFUZZ_CMD_MOD_2FSK, RFUZZ_CMD_MOD_GFSK
+    RFUZZ_CMD_MOD_2FSK, RFUZZ_CMD_MOD_GFSK,
+    RFUZZ_CMD_TX_START, RFUZZ_CMD_TX_STOP,
+    RFUZZ_CMD_RX_START, RFUZZ_CMD_RX_STOP
 } rfuzz_command_t;
 
 typedef struct {
@@ -22,6 +24,7 @@ typedef struct {
 
 esp_err_t rfuzz_console_init(void);
 rfuzz_command_t rfuzz_console_poll(void);
+bool rfuzz_console_is_typing(void);
 
 static inline bool rfuzz_console_space(unsigned char c)
 {
@@ -55,12 +58,27 @@ static inline rfuzz_command_t rfuzz_console_parse_line(char *line)
             (!strcmp(tokens[0], "mode") && !strcmp(tokens[1], "pck")))
             return RFUZZ_CMD_PACKET;
         if (!strcmp(tokens[1], "raw")) return RFUZZ_CMD_RAW;
+        if (!strcmp(tokens[1], "start") || !strcmp(tokens[1], "on") || !strcmp(tokens[1], "send"))
+            return RFUZZ_CMD_RX_START;
+        if (!strcmp(tokens[1], "stop") || !strcmp(tokens[1], "off"))
+            return RFUZZ_CMD_RX_STOP;
     } else if (!strcmp(tokens[0], "mod")) {
         if (!strcmp(tokens[1], "ook")) return RFUZZ_CMD_MOD_OOK;
         if (!strcmp(tokens[1], "ask")) return RFUZZ_CMD_MOD_ASK;
         if (!strcmp(tokens[1], "2fsk") || !strcmp(tokens[1], "fsk"))
             return RFUZZ_CMD_MOD_2FSK;
         if (!strcmp(tokens[1], "gfsk")) return RFUZZ_CMD_MOD_GFSK;
+    } else if (!strcmp(tokens[0], "tx")) {
+        if (!strcmp(tokens[1], "start") || !strcmp(tokens[1], "send") || !strcmp(tokens[1], "on"))
+            return RFUZZ_CMD_TX_START;
+        if (!strcmp(tokens[1], "stop") || !strcmp(tokens[1], "off"))
+            return RFUZZ_CMD_TX_STOP;
+    } else if (!strcmp(tokens[0], "start") || !strcmp(tokens[0], "stop")) {
+        bool start = !strcmp(tokens[0], "start");
+        if (!strcmp(tokens[1], "tx"))
+            return start ? RFUZZ_CMD_TX_START : RFUZZ_CMD_TX_STOP;
+        if (!strcmp(tokens[1], "rx"))
+            return start ? RFUZZ_CMD_RX_START : RFUZZ_CMD_RX_STOP;
     }
     return RFUZZ_CMD_UNKNOWN;
 }

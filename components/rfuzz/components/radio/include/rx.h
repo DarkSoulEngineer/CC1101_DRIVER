@@ -39,5 +39,7 @@ bool rfuzz_rx_is_packet(void);
 void rfuzz_rx_status(void);
 void rfuzz_rx_raw_service(void);
 void rfuzz_rx_listen_poll(void);
+void rfuzz_rx_set_paused(bool paused);
+bool rfuzz_rx_is_paused(void);
 
 #endif

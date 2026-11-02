@@ -1,5 +1,6 @@
 #include "rx.h"
 #include "radio.h"
+#include "terminal.h"
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -14,12 +15,23 @@ static cc1101_handle_t s_rx_radio;
 static cc1101_modulation_t s_modulation = CC1101_PROFILE_OOK;
 static cc1101_rx_format_t s_format = CC1101_RX_PACKET;
 static bool s_mode_valid;
+static bool s_rx_paused = false;
 static int64_t s_raw_report_us;
 static uint64_t s_processed_blocks, s_processed_symbols, s_processed_pulses;
 static uint64_t s_output_suppressed_blocks, s_output_suppressed_pulses;
 
 bool rfuzz_rx_is_raw(void) { return s_mode_valid && s_format == CC1101_RX_RAW; }
 bool rfuzz_rx_is_packet(void) { return s_mode_valid && s_format == CC1101_RX_PACKET; }
+
+void rfuzz_rx_set_paused(bool paused)
+{
+    s_rx_paused = paused;
+}
+
+bool rfuzz_rx_is_paused(void)
+{
+    return s_rx_paused;
+}
 
 esp_err_t rfuzz_rx_capture_stop(void)
 {
@@ -69,17 +81,23 @@ void rfuzz_rx_status(void)
 {
     rfuzz_raw_stats_t stats;
     rfuzz_b_raw_stats(&stats);
-    ESP_LOGI(RX_TAG, "capture epoch=%lu sequence=%lu raw=%d active=%d paused=%d valid=%d backend=%s copied_blocks=%llu copied_symbols=%llu event_drops=%llu known_dropped_symbols=%llu rearm=%llu gaps=%llu hardware_loss_unknown=%d",
+    ESP_LOGI(RX_TAG, "=== Radio B capture ===");
+    ESP_LOGI(RX_TAG, "  epoch=%lu  sequence=%lu  raw=%s  active=%s  paused=%s  valid=%s  backend=%s",
              (unsigned long)stats.epoch, (unsigned long)stats.sequence,
-             stats.raw_mode, stats.active, stats.paused, stats.valid,
-             esp_err_to_name(stats.backend_error),
-             (unsigned long long)stats.copied_blocks, (unsigned long long)stats.copied_symbols,
+             stats.raw_mode ? "yes" : "no", stats.active ? "yes" : "no",
+             stats.paused ? "yes" : "no", stats.valid ? "yes" : "no",
+             esp_err_to_name(stats.backend_error));
+    ESP_LOGI(RX_TAG, "  copied:  blocks=%llu  symbols=%llu",
+             (unsigned long long)stats.copied_blocks, (unsigned long long)stats.copied_symbols);
+    ESP_LOGI(RX_TAG, "  events:  drops=%llu  dropped_symbols=%llu  rearm=%llu  gaps=%llu  hw_loss_unknown=%s",
              (unsigned long long)stats.event_drops, (unsigned long long)stats.known_dropped_symbols,
              (unsigned long long)stats.rearm_count, (unsigned long long)stats.gap_count,
-             stats.hardware_loss_unknown);
-    ESP_LOGI(RX_TAG, "processed_blocks=%llu symbols=%llu pulses=%llu output_suppressed_blocks=%llu output_suppressed_pulses=%llu (output omission, NOT capture loss; cumulative)",
+             stats.hardware_loss_unknown ? "yes" : "no");
+    ESP_LOGI(RX_TAG, "  processed: blocks=%llu  symbols=%llu  pulses=%llu",
              (unsigned long long)s_processed_blocks, (unsigned long long)s_processed_symbols,
-             (unsigned long long)s_processed_pulses, (unsigned long long)s_output_suppressed_blocks,
+             (unsigned long long)s_processed_pulses);
+    ESP_LOGI(RX_TAG, "  output suppressed: blocks=%llu  pulses=%llu (output omission, NOT capture loss; cumulative)",
+             (unsigned long long)s_output_suppressed_blocks,
              (unsigned long long)s_output_suppressed_pulses);
 }
 
@@ -87,12 +105,13 @@ void rfuzz_rx_raw_service(void)
 {
     /* Rearm completed receives before any console formatting or block draining. */
     rfuzz_b_capture_service();
+    if (s_rx_paused || rfuzz_console_is_typing()) return;
     if (!rfuzz_rx_is_raw()) return;
     rfuzz_raw_stats_t stats;
     rfuzz_b_raw_stats(&stats);
     if (!stats.valid || stats.backend_error != ESP_OK) {
         rfuzz_rx_capture_stop();
-        ESP_LOGE(RX_TAG, "capture backend failed; profile recovery required");
+        ESP_LOGE(RX_TAG, "Capture backend failed; profile recovery required.");
         return;
     }
     for (unsigned batch = 0; batch < 2; batch++) {
@@ -125,10 +144,12 @@ void rfuzz_rx_raw_service(void)
         s_processed_pulses += pulses;
         s_output_suppressed_pulses += pulses - shown;
         if (emit) {
-            ESP_LOGI(RX_TAG, "RAW epoch=%lu seq=%lu is_last=%d callback_notification_us=%lld symbols=%u pulses=%u preview(L:duration):%s; partial framing is NOT a packet boundary; gaps/loss unknown, no IQ/decoded bits",
+            ESP_LOGI(RX_TAG, "RAW block: epoch=%lu  seq=%lu  is_last=%s  callback_us=%lld  symbols=%u  pulses=%u",
                      (unsigned long)block->epoch, (unsigned long)block->sequence,
-                     block->is_last, (long long)block->callback_us,
-                     (unsigned)block->count, (unsigned)pulses, preview);
+                     block->is_last ? "yes" : "no", (long long)block->callback_us,
+                     (unsigned)block->count, (unsigned)pulses);
+            ESP_LOGI(RX_TAG, "  preview (level:duration):%s", preview);
+            ESP_LOGI(RX_TAG, "  note: partial framing is NOT a packet boundary; no IQ/decoded bits");
             s_raw_report_us = now;
         } else s_output_suppressed_blocks++;
         rfuzz_b_raw_release();
@@ -160,8 +181,10 @@ static bool rfuzz_rx_poll(rfuzz_rx_report_t *report)
 void rfuzz_rx_listen_poll(void)
 {
     rfuzz_rx_report_t report = {0};
+    if (s_rx_paused || rfuzz_console_is_typing()) return;
     if (!rfuzz_rx_poll(&report)) return;
-    ESP_LOGI(RX_TAG, "RX EXTERNAL len=%u crc=%s (no golden comparison)",
-             (unsigned)report.len, report.result == RFUZZ_RX_VALID ? "OK" : "FAIL");
+    ESP_LOGI(RX_TAG, "RX external: len=%u  crc=%s  rssi=%.1f dBm  lqi=%d (no golden comparison)",
+             (unsigned)report.len, report.result == RFUZZ_RX_VALID ? "OK" : "FAIL",
+             report.rssi_dbm, (int)report.lqi);
     rfuzz_log_hex(RX_TAG, "RX external payload:", report.payload, report.len);
 }

@@ -1,5 +1,6 @@
 #include "tx.h"
 #include "radio.h"
+#include "terminal.h"
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -44,4 +45,20 @@ esp_err_t rfuzz_tx_apply_profile_locked(cc1101_modulation_t modulation)
 esp_err_t rfuzz_tx_profile_readback_locked(cc1101_profile_status_t *out)
 {
     return cc1101_profile_readback_locked(&s_tx_radio, out);
+}
+
+esp_err_t rfuzz_tx_send_once(void)
+{
+    static const uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    if (xSemaphoreTake(cc1101_bus_mutex, pdMS_TO_TICKS(200)) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    cc1101_transmit(&s_tx_radio, (uint8_t *)payload, sizeof(payload));
+    xSemaphoreGive(cc1101_bus_mutex);
+    xSemaphoreTake(tx_done_sem_a, pdMS_TO_TICKS(100));
+    if (xSemaphoreTake(cc1101_bus_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        (void)cc1101_idle_locked(&s_tx_radio);
+        xSemaphoreGive(cc1101_bus_mutex);
+    }
+    ESP_LOGI("RFUZZ_TX", "TX send complete: 4 bytes (DE AD BE EF)");
+    return ESP_OK;
 }

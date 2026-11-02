@@ -22,12 +22,34 @@ static void hang_on_error(const char *what)
     while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
 }
 
+static const char *mod_name_for_command(rfuzz_command_t command)
+{
+    switch (command) {
+    case RFUZZ_CMD_MOD_OOK: return "OOK";
+    case RFUZZ_CMD_MOD_ASK: return "ASK";
+    case RFUZZ_CMD_MOD_2FSK: return "2FSK";
+    case RFUZZ_CMD_MOD_GFSK: return "GFSK";
+    default: return "?";
+    }
+}
+
 static void rfuzz_apply_console_command(void)
 {
     rfuzz_command_t command = rfuzz_console_poll();
     switch (command) {
     case RFUZZ_CMD_HELP:
-        ESP_LOGI(TAG, "commands: help | status | rx packet/raw | mode pck/raw | mod ook/ask/2fsk/gfsk (fsk=2fsk); raw=digital demodulator, not IQ; no automatic TX");
+        ESP_LOGI(TAG, "RFUZZ dual-radio console commands:");
+        ESP_LOGI(TAG, "  help                       Show this help");
+        ESP_LOGI(TAG, "  status                     Show profile, radios, and capture status");
+        ESP_LOGI(TAG, "  mode packet | pck          Radio B packet RX (mode packet / rx packet)");
+        ESP_LOGI(TAG, "  mode raw                   Radio B raw digital demodulator capture");
+        ESP_LOGI(TAG, "  rx packet | raw            Alias for 'mode ...'");
+        ESP_LOGI(TAG, "  mod ook | ask | 2fsk | gfsk  Queue coordinated A/B profile (fsk=2fsk)");
+        ESP_LOGI(TAG, "  tx start | send            Transmit one packet on Radio A");
+        ESP_LOGI(TAG, "  tx stop                   Idle Radio A (TX off)");
+        ESP_LOGI(TAG, "  rx start                  Enable RX reporting/listening");
+        ESP_LOGI(TAG, "  rx stop                   Pause RX reporting (radio stays in RX)");
+        ESP_LOGI(TAG, "");
         break;
     case RFUZZ_CMD_STATUS:
         rfuzz_profile_status(&s_profile);
@@ -35,7 +57,9 @@ static void rfuzz_apply_console_command(void)
     case RFUZZ_CMD_PACKET:
     case RFUZZ_CMD_RAW:
         if (!rfuzz_profile_mode(&s_profile, command == RFUZZ_CMD_PACKET ? CC1101_RX_PACKET : CC1101_RX_RAW))
-            ESP_LOGW(TAG, "invalid profile; recover with mod before changing mode");
+            ESP_LOGW(TAG, "Mode change rejected: profile invalid. Recover with 'mod ...'.");
+        else
+            ESP_LOGI(TAG, "Mode request queued: %s", command == RFUZZ_CMD_PACKET ? "packet" : "raw");
         break;
     case RFUZZ_CMD_MOD_OOK:
     case RFUZZ_CMD_MOD_ASK:
@@ -45,17 +69,42 @@ static void rfuzz_apply_console_command(void)
                          command == RFUZZ_CMD_MOD_OOK ? CC1101_PROFILE_OOK :
                          command == RFUZZ_CMD_MOD_ASK ? CC1101_PROFILE_ASK :
                          command == RFUZZ_CMD_MOD_2FSK ? CC1101_PROFILE_2FSK : CC1101_PROFILE_GFSK);
-        ESP_LOGI(TAG, "profile request queued; TX stays disabled");
+        ESP_LOGI(TAG, "Profile request queued: %s (TX stays disabled)", mod_name_for_command(command));
         break;
-    case RFUZZ_CMD_UNKNOWN: ESP_LOGW(TAG, "unknown command; use help"); break;
-    case RFUZZ_CMD_TOO_LONG: ESP_LOGW(TAG, "line too long/invalid; discarded"); break;
+    case RFUZZ_CMD_TX_START:
+        if (rfuzz_tx_send_once() == ESP_OK)
+            ESP_LOGI(TAG, "TX: packet sent (Radio A)");
+        else
+            ESP_LOGW(TAG, "TX: send failed or busy");
+        break;
+    case RFUZZ_CMD_TX_STOP:
+        if (xSemaphoreTake(cc1101_bus_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            rfuzz_tx_idle_locked();
+            xSemaphoreGive(cc1101_bus_mutex);
+            ESP_LOGI(TAG, "TX: Radio A idled");
+        } else ESP_LOGW(TAG, "TX: bus busy");
+        break;
+    case RFUZZ_CMD_RX_START:
+        rfuzz_rx_set_paused(false);
+        ESP_LOGI(TAG, "RX: reporting enabled");
+        break;
+    case RFUZZ_CMD_RX_STOP:
+        rfuzz_rx_set_paused(true);
+        ESP_LOGI(TAG, "RX: reporting paused");
+        break;
+    case RFUZZ_CMD_UNKNOWN:
+        ESP_LOGW(TAG, "Unknown command. Type 'help' for the command list.");
+        break;
+    case RFUZZ_CMD_TOO_LONG:
+        ESP_LOGW(TAG, "Line too long or invalid; discarded.");
+        break;
     default: break;
     }
 }
 
 void rfuzz_run(void)
 {
-    ESP_LOGI(TAG, "Starting RFuzz Dual-Radio Console...");
+    ESP_LOGI(TAG, "Starting RFuzz dual-radio console...");
 
     if (init_hardware() != ESP_OK)
         hang_on_error("hardware init");
@@ -69,7 +118,7 @@ void rfuzz_run(void)
 
     if (rfuzz_console_init() != ESP_OK)
         hang_on_error("nonblocking console setup");
-    ESP_LOGI(TAG, "UART0 115200: help | status | rx packet/raw | mode pck/raw | mod ook/ask/2fsk/gfsk;");
+    ESP_LOGI(TAG, "UART0 @115200 baud. Type 'help' for commands.");
 
     while (1)
     {
