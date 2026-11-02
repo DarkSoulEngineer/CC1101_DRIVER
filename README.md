@@ -1,5 +1,5 @@
 # CC1101_DRIVER
-**A handle-based ESP-IDF C driver for the TI CC1101 sub-1 GHz RF transceiver, shipped with RFuzz dual-radio link validation on ESP32-S3.**
+**A handle-based ESP-IDF C driver for the TI CC1101 sub-1 GHz RF transceiver, shipped with the RFuzz dual-radio console on ESP32-S3.**
 
 [![License](https://img.shields.io/github/license/DarkSoulEngineer/CC1101_DRIVER)](LICENSE)
 ![Language](https://img.shields.io/badge/language-C-blue)
@@ -21,7 +21,7 @@
 
 ## Description
 
-CC1101_DRIVER is an ESP-IDF component for the Texas Instruments CC1101 sub-1 GHz RF transceiver, written in C. It wraps the CC1101 register interface and command strobes in a handle-based API so one application can address one or more radios over SPI, and it exposes runtime control of frequency, channel, data rate, TX power, and packet length. RFuzz initializes two radios on an ESP32-S3: Radio A transmits a periodic test packet and Radio B validates its payload and CRC.
+CC1101_DRIVER is an ESP-IDF component for the Texas Instruments CC1101 sub-1 GHz RF transceiver, written in C. It wraps the CC1101 register interface and command strobes in a handle-based API so one application can address one or more radios over SPI, and it exposes runtime control of frequency, channel, data rate, TX power, and packet length. RFuzz initializes two radios on an ESP32-S3: Radio A is configured but stays idle (no automatic transmission), and Radio B listens and reports received packets. There is no golden-payload validation in the current lean firmware.
 
 The driver targets the CC1101 bands at 300–348 MHz, 387–464 MHz, and 779–928 MHz. `cc1101_set_frequency` programs the FREQ2/FREQ1/FREQ0 registers from a target frequency in Hz against the 26 MHz crystal. `cc1101_config` applies a 433.92 MHz OOK packet-mode baseline at approximately 38.4 kbps, with 30/32 sync detection and CRC enabled. See the [default radio profile](#default-radio-profile) for power and regulatory limitations.
 
@@ -37,7 +37,7 @@ The driver targets the CC1101 bands at 300–348 MHz, 387–464 MHz, and 779–9
 - **Frequency presets** for 433.92 MHz, 868.3 MHz, and 915.0 MHz (`CC1101_FREQ_433_92_x`, `CC1101_FREQ_868_3_x`, `CC1101_FREQ_915_0_x`).
 - **Register dump helper**: `cc1101_dump_registers` logs the configuration register space plus PARTNUM, VERSION, and MARCSTATE.
 - **Hardware init component**: `hw_init` sets up shared SPI3_HOST over `SPI_DMA_CH_AUTO`, separate software CS lines, dual GDO0 interrupts, and a bus mutex.
-- **RFuzz application**: `main/main.c` imports `rfuzz_tx.c` and `rfuzz_rx.c` in one translation unit, with a shared link profile and packet/error counters.
+- **RFuzz application**: `components/rfuzz` is the top-level component; it depends on `cc1101`, `hw_init`, and three nested sub-components discovered via `EXTRA_COMPONENT_DIRS`: `components/rfuzz/components/terminal` (UART console), `components/rfuzz/components/profile` (coordinated modulation), and `components/rfuzz/components/radio` (Radio A/B TX and RX). The top-level component compiles only `src/rfuzz.c` (the main loop) and includes the sub-components' headers; the application entry point is `rfuzz_run()`.
 
 ## Requirements
 
@@ -145,34 +145,60 @@ cc1101_transmit(&radio, payload, sizeof(payload));
 
 ### Running the RFuzz Demos
 
-`main/CMakeLists.txt` compiles a single source file:
+#### Application organization
 
-```cmake
-idf_component_register(SRCS "main.c"
-                    INCLUDE_DIRS "."
-                    REQUIRES hw_init cc1101 freertos log esp_timer)
-```
+The application is split into ESP-IDF components under `components/`: `cc1101` (the chip driver), `hw_init` (shared SPI bus, GPIO, RMT capture), and `rfuzz` (everything else). `main/` contains only the thin `app_main` entrypoint. Inside `rfuzz`, the top-level component compiles only `src/rfuzz.c` (the main loop, entry `rfuzz_run()`); the radio transport, profile coordination, and console live in the nested sub-components `components/rfuzz/components/{radio,profile,terminal}`. Headers are included, **not `.c` files**. There is no automatic transmission or golden-payload validation; Radio A is configured but stays idle, and Radio B reports whatever it receives. There is one main-loop owner, with no new framework or tasks. Verification evidence is version-specific; see below.
 
-Keep `main.c` as the entry point: it imports both lowercase `rfuzz_tx.c` and `rfuzz_rx.c`; they are not standalone applications. Radio A sends `DE AD BE EF`, waits up to 100 ms for `tx_done_sem_a`, and Radio B checks the received packet within a 250 ms window. Each completed iteration is followed by a 5000 ms delay. Logs report TX confirmation, matching payloads, CRC failures, corruption, and misses.
+| Component | Responsibility |
+|-----------|----------------|
+| `main` | Thin `app_main` entrypoint that calls `rfuzz_run()` (provided by `rfuzz`). |
+| `components/cc1101` | CC1101 chip driver; reusable on its own. |
+| `components/hw_init` | Shared SPI3 bus, software CS, dual GDO0 interrupts, bus mutex, RMT capture. |
+| `components/rfuzz` | Radio A TX send/idle, Radio B packet/raw reception, coordinated A/B profile transitions, bounded UART console, and the main loop. Depends on `cc1101` and `hw_init`. |
+
+The current firmware does **not** transmit automatically: Radio A is configured as a packet transmitter but stays idle, and there is no five-second automatic TX cadence, TX-completion wait, or golden-payload/CRC validation loop. Radio B listens and reports whatever it receives (packet or raw), including externally received packets in packet mode, with no comparison to `DE AD BE EF` and no miss/crash accounting. The historical automatic-link-test behavior (DE AD BE EF, 100 ms TX wait, 250 ms RX window, five-second spacing) is described under the evidence sections below and is not active in this lean build.
 
 A bounded 40-second hardware run with the C8 profile booted successfully, identified both radios (`PARTNUM=00 VERSION=14`), and observed eight matching CRC-valid packets with no misses. This validates that packet link only, not RF power or regulatory compliance.
 
 #### Receive-mode console selector
 
-The current change is limited to selecting Radio B's receive path; broader serial configuration is **planned, not implemented**. Selector commands (newline-terminated) use the existing **UART0 console at 115200 baud**, through the CH343 adapter. `COM14` is typical on this development machine only; confirm your own port. One console reader passes requests to the main application's mode owner; do not run competing serial consumers.
+Serial controls select Radio B's receive path and apply one of four coordinated modulation profiles. There is no automatic transmitter in the current lean build, so Radio A stays idle and there are no `tx` commands; broader independent serial knobs remain **planned, not implemented**. Commands (newline-terminated) use the existing **UART0 console at 115200 baud**, through the CH343 adapter. `COM14` is typical on this development machine only; confirm your own port. Commands and arguments are ASCII case-insensitive and allow repeated spaces/tabs; extra arguments, binary input, and oversized lines are rejected. One console reader passes typed requests to the main owner; do not run competing serial consumers.
 
 | Command | Purpose |
 |---------|---------|
 | `help` | List supported commands. |
-| `status` | Report current receive mode/status. |
-| `rx packet` | Select the default packet receiver, retaining the golden four-byte `DE AD BE EF` payload checks and hardware CRC. |
-| `rx raw` | Select asynchronous digital OOK on Radio B's existing GDO0 (GPIO5), reporting bounded level-duration batches and drop counts. |
+| `status` | Report requested/last-applied modulation and B mode, validity/pending state, actual A/B register readbacks, and cumulative capture/output counters. |
+| `mode pck` | Select B packet RX (`mode packet` and legacy `rx packet` also work). B reports received packets and their CRC without any golden comparison. |
+| `mode raw` | Select digital demodulator output on B GDO0 GPIO5 (`rx raw` also works), using bounded RMT level-duration capture. Radio A remains configured as a packet transmitter but is idle. |
+| `mod ook` / `mod ask` / `mod 2fsk` / `mod gfsk` | Queue the latest coordinated A/B profile request and apply it; `mod fsk` aliases `mod 2fsk`. Repeated modulation commands reapply safely. |
 
-Raw output is **not IQ or analog sampling**, is not guaranteed lossless, and is not automatically decoded into bits. Radio A continues its original packet transmission approximately every five seconds even while B receives raw OOK; a receive-only TX pause is **not implemented**. Returning to packet mode must restore the packet profile and receive interrupt behavior.
+Raw output is **digital demodulator output for the selected modulation**, not IQ, analog samples, or automatically decoded bits. GDO0 cannot provide true I/Q. Mode requests change B only, preserve the selected modulation, and defer to any pending coordinated profile transition. A modulation command always leaves the profile transition pending until it is applied; repeating the same modulation safely reapplies it. Any transition failure stops capture, invalidates the coordinated profile, and makes a best-effort A/B IDLE request; there is no promised rollback. A bus-lock timeout retains the cleanup latch for retry without applying profiles. Recover explicitly with `mod ...`; mode-only changes cannot repair invalid state.
 
-The selector passed an ESP-IDF v6.1 build, host tests of the C command parser, and mocked driver transition/failure-path tests. After authorized flashing to the ESP32-S3 through CH343 on COM14, a bounded hardware run exercised three raw-to-packet restoration cycles. Status readbacks matched raw `PKTCTRL0/MDMCFG2/IOCFG0=30/30/0D` and packet `05/33/06`, with `MARCSTATE=0D`; eight matching CRC-good golden packets were observed, including at least two after each restoration. Commands remained responsive during raw capture, invalid/oversized input was rejected safely, and observed TX intervals remained at least five seconds. No application error, panic, watchdog reset, or visible heap-failure symptom was observed during this run.
+Example sequence (no RF transmission is enabled by these commands; the firmware does not transmit automatically):
 
-Raw batches and sample-drop counter/reset behavior were observed, but accurate raw timing, losslessness, ring-overflow/backpressure stress behavior, and RF power/compliance were **not validated**. Ring overflow and observed-edge-drop counters stayed zero in this test; omitted samples and potentially missed ISR edges must not be interpreted as a complete waveform. The future configuration controls below remain planned, not implemented. Further flashing or additional RF activity requires explicit approval.
+```text
+mod ook
+mode raw
+status
+```
+
+Use `mod ASK`, `mod 2FSK` (or `mod FSK`), or `mod GFSK` instead of `mod ook` for the other candidate profiles. Wait for successful apply/status before changing mode; modulation commands are rejected while a profile transition is pending or invalid.
+
+The current firmware does **not** transmit automatically and does not gate or enable TX. `status` reports the requested/last-applied modulation and B mode, validity/pending state, actual A/B register readbacks, and cumulative RMT capture/output counters. There is no TX completion deadline or completion history in this lean build. Radio A stays idle; if automatic or manual transmission is needed later, it must be added as a separate change.
+
+In packet mode, B polls once per approximately 10 ms main-loop tick and prints externally received payloads with hardware CRC outcome, without comparing them to `DE AD BE EF` or adding absent-local-TX/crash counters. External packets still need the configured frequency, modulation, rate, sync, framing, and CRC profile; this is not an arbitrary-protocol decoder. The earlier module organization changes passed ESP-IDF v6.1 build/host regression checks but were not flashed. **The coordinated profiles and RMT capture are also not flashed or hardware-validated by this change**; the earlier selector test below does not cover them.
+
+The selector at `f06cca6` passed an ESP-IDF v6.1 build, host tests of the C command parser, and mocked driver transition/failure-path tests. After authorized flashing to the ESP32-S3 through CH343 on COM14, a bounded hardware run exercised three raw-to-packet restoration cycles. Status readbacks matched raw `PKTCTRL0/MDMCFG2/IOCFG0=30/30/0D` and packet `05/33/06`, with `MARCSTATE=0D`; eight matching CRC-good golden packets were observed, including at least two after each restoration. Commands remained responsive during raw capture, invalid/oversized input was rejected safely, and observed TX intervals remained at least five seconds. No application error, panic, watchdog reset, or visible heap-failure symptom was observed during this run.
+
+That historical selector run does not validate the later TX pause/listen-only path, module reorganization, coordinated modulation profiles, or replacement RMT backend. These require separately approved hardware validation.
+
+For the new integration, host tests compile the production coordinator, RX module, and main command dispatch with mocked UART/radio/capture interfaces. They passed four-profile transitions, B-only mode restoration, partial-failure gating/recovery, deferred/coalesced in-flight requests, rejected premature starts, preserved TX spacing, listen-only packets, bounded RMT summary/counter checks, and deferred A/B IDLE cleanup after in-flight capture failure (including lock-timeout retries and queued recovery). The final ESP-IDF v6.1 whole firmware build, including the corrected RMT teardown backend and deferred cleanup fix, passed using `ninja -j1` in the existing temporary build directory after the initial parallel build encountered an unrelated LCD compiler crash. `RFuzz.bin` is 254688 bytes (76% of the app partition remains free), SHA-256 `f4993da09679150ec49c8466db1c1c2dca30df4735aa3f885e43b69d14625fb2`. No flashing was performed. None of these host/build checks validates hardware timing, RF performance, or capture loss.
+
+The module tree was then reorganized into per-module components (`components/serial_console`, `radio`, `profile_control`, `app_loop`) and `main/` reduced to a thin entrypoint; TX and RX shared the `radio` component. That layout compiled and linked cleanly in a clean ESP-IDF v6.1 ESP32-S3 build (`RFuzz.bin` 0x3E2E0 bytes, 76% of the app partition free); it was not flashed, so no hardware claim is attached to it. The later lean change removed the automatic-transmission and golden-payload features and merged the RFuzz application into a single `components/rfuzz` component; the current lean build is also not flashed.
+
+In that older GPIO-edge test, raw batches and sample-drop counter/reset behavior were observed, but accurate timing, losslessness, overflow/backpressure stress, and RF power/compliance were **not validated**. Its zero observed overflow/drop counters are not evidence for the new backend.
+
+The RMT backend uses **1 us resolution**, a **1 us glitch filter**, **5 ms idle termination**, 1024-symbol partial blocks, and two static delivery slots (~12 KiB total capture buffers including the receive buffer). Each symbol contains up to two level/duration pairs; zero-duration terminators are skipped. Service/rearm precedes formatting; at most two blocks drain per main background call, with at most one serial batch per second and up to 16 pulse previews. Output includes epoch/sequence/is-last metadata; partial or final capture framing is **not a radio packet boundary**, and callback time is notification time, **not the first edge timestamp**. Capture gaps and unknown hardware loss prevent any promise of a continuous or lossless waveform. Cumulative callback/event drops, known dropped symbols, rearms, and gaps remain separate from explicitly named output-suppression counters; output omitted for serial bandwidth is not itself capture loss. Further flashing or additional RF activity requires explicit approval.
 
 ## Hardware Interfacing
 
@@ -183,17 +209,19 @@ At startup both radios use **OOK packet mode** at 433.92 MHz and approximately 3
 with the existing 101.5625 kHz RX bandwidth (26 MHz crystal). This is not raw
 GPIO/asynchronous OOK: FIFO framing, preamble, sync, variable-length packets,
 hardware CRC, and appended RX status remain unchanged in the default packet path.
-The receive selector changes only Radio B to raw asynchronous OOK when requested;
+The receive selector changes only Radio B to raw asynchronous demodulator output when requested;
 it does not change Radio A's packet transmitter.
+
+The coordinated modulation commands provide fixed **candidate, hardware-unvalidated** profiles at the same 433.92 MHz, approximately 38.383 kbps, and 101.5625 kHz RX bandwidth. OOK uses PA levels `00/C8`; true two-level ASK uses two nonzero levels `34/C8` (nominal -10/+7 dBm, about 17 dB contrast, not measured). 2-FSK and GFSK use `DEVIATN=35`, approximately +/-20.63 kHz deviation. `C8` remains the PA ceiling; the lean firmware does not transmit automatically, so there is no automatic TX rate to increase. These are selected compatible profiles, not arbitrary independent parameter combinations or guaranteed RF performance.
 
 The OOK configuration uses `MDMCFG2=0x33`, clears `FOCCFG.FOC_LIMIT`, and starts
 RX AGC at `AGCCTRL2/1/0=0x03/0x00/0x91` (TI DN022 starting profile).
 These AGC settings require hardware tuning; they are not guaranteed optimal.
 `FREND1` remains at reset `0xB6` for the existing bandwidth above 101 kHz.
 
-`cc1101_set_tx_power()` writes OOK PATABLE entries `{0x00, on_power}` in one
-burst and selects `FREND0.PA_POWER=1`, preserving other front-end bits.
-For non-OOK modulation it writes a single entry and selects index 0.
+`cc1101_set_tx_power()` writes two PATABLE entries for OOK (`{0x00, on_power}`)
+or ASK (`{0x34, on_power}`), selecting `FREND0.PA_POWER=1` and preserving
+other front-end bits. For 2-FSK/GFSK it writes a single power entry and selects index 0.
 Both radios use shared `CC1101_DEFAULT_PA_433_MHZ=0xC8`, including Radio A's
 explicit override: OOK PATABLE is `{0x00, 0xC8}`, with index 1 selected.
 [TI SWRS061I, Table 39](https://www.ti.com/lit/ds/symlink/cc1101.pdf) lists
@@ -208,10 +236,11 @@ exact implementation of that ERP target. Unknown antenna gain, losses, and
 hardware tolerances mean this configuration cannot guarantee ERP compliance;
 the assembled system requires measurement and applicable-rule verification.
 
-Duty cycle must include complete packets and any retries. The current
-4-byte test payload gives 4 preamble + 4 sync + 1 length + 4 payload + 2 CRC
+Duty cycle must include complete packets and any retries. The historical
+automatic-test payload gave 4 preamble + 4 sync + 1 length + 4 payload + 2 CRC
 = 15 transmitted bytes: approximately 3.13 ms at 38.4 kbps, or 0.063% for
-one packet per 5 seconds. This is a calculation, not a measured duty cycle.
+one packet per 5 seconds. This is a calculation for that historical cadence,
+not a measured duty cycle; the current lean firmware does not transmit.
 
 The driver relies on the host application to initialize the physical SPI bus, ensuring the component remains decoupled from specific ESP32 pinouts or SPI peripherals. Dual-radio setup: both CC1101s share one SPI3 bus; each has its own software-managed CS line and GDO0 interrupt.
 
@@ -225,16 +254,16 @@ The driver relies on the host application to initialize the physical SPI bus, en
 | **CSN B**  | `PIN_NUM_CS_B` (10)   | Chip Select - Radio B (RX/target)   |
 | **GDO0 B** | `PIN_NUM_GDO0_B` (5)  | Interrupt - Radio B (RX/sync)       |
 
-Pin definitions are in `components/hw_init/include/hw_init.h`. The bus is initialized on `SPI3_HOST` with `SPI_DMA_CH_AUTO`, 1 MHz mode 0, and a maximum transfer size of 256 bytes. Chip select is not handled by the SPI peripheral; `cc1101.c` raises and lowers each CS pin directly around transactions, polling MISO for readiness. Both GDO0 interrupts use negative edges in packet mode; raw capture requires both edges on B and restoration of the packet interrupt configuration afterward. GDO2 is not wired; `CC1101_IOCFG2` is configured as a sync-word output.
+Pin definitions are in `components/hw_init/include/hw_init.h`. The bus is initialized on `SPI3_HOST` with `SPI_DMA_CH_AUTO`, 1 MHz mode 0, and a maximum transfer size of 256 bytes. Chip select is not handled by the SPI peripheral; `cc1101.c` raises and lowers each CS pin directly around transactions, polling MISO for readiness. Both GDO0 interrupts use negative edges in packet mode; B raw uses RMT exclusively instead of a GPIO edge ISR, restoring packet IRQ handling on return. GDO2 is not wired; `CC1101_IOCFG2` is configured as a sync-word output.
 
 ## Staged Roadmap
 
-Only the packet/raw receive selector is in the current implementation scope; completion requires source and verification evidence. The following are **future work, not implemented serial commands**:
+Packet/raw selection, four coordinated modulation profiles, and bounded RMT capture are implemented in source, with the validation limits above. There is no automatic transmission, golden-payload validation, or TX stop/start command in the current lean build. The following are **future work, not implemented serial commands**:
 
-1. Validated modulation profiles and coordinated data-rate, RX-bandwidth, and deviation controls, rejecting unsupported combinations rather than exposing arbitrary invalid settings.
+1. Hardware tuning/validation of the candidate profiles, then coordinated data-rate, RX-bandwidth, and deviation controls with unsupported-combination rejection.
 2. Sync word/detection and preamble-length controls; CRC, whitening, and address-filtering controls with compatible packet framing.
-3. Signal-type and TX-waveform choices, plus a receive-only mode that explicitly pauses Radio A.
-4. Reliable RMT raw capture with measured timing/overflow limits, parser/profile tests, register readbacks, and approved packet/raw transition and hardware tests.
+3. Signal-type and TX-waveform choices, plus a manual transmit command if needed (the lean build has no automatic TX). Receive-only listening is the default behavior of the current firmware.
+4. Measured RMT timing/overflow/backpressure limits and approved multi-profile packet/raw transition tests; further capture reliability improvements without a lossless guarantee.
 
 See [AGENTS.md](AGENTS.md) for ownership, ISR safety, verification, and approval boundaries. These plans do not imply hardware validation or RF compliance.
 

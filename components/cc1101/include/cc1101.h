@@ -241,7 +241,8 @@ typedef struct {
  * ============================================================ */
 esp_err_t cc1101_set_frequency(cc1101_handle_t *dev, uint32_t freq_hz);
 esp_err_t cc1101_set_channel(cc1101_handle_t *dev, uint8_t channel);
-/* OOK: PATABLE {off=0, on=pa_value}, PA_POWER=1; otherwise entry/index 0. */
+/* ASK/OOK: preserve configured ASK low=0x34 (otherwise off=0), high=pa_value, PA_POWER=1;
+ * other modulation: entry/index 0. Caller owns bus serialization. */
 esp_err_t cc1101_set_tx_power(cc1101_handle_t *dev, uint8_t pa_value);
 esp_err_t cc1101_set_datarate(cc1101_handle_t *dev, uint32_t baud);
 esp_err_t cc1101_set_tx_len(cc1101_handle_t *dev, uint8_t len);
@@ -264,8 +265,45 @@ void cc1101_set_tx_mode(cc1101_handle_t *dev);
 void cc1101_set_rx_mode(cc1101_handle_t *dev);
 typedef enum {
     CC1101_RX_PACKET = 0,
-    CC1101_RX_RAW_OOK
+    CC1101_RX_RAW,
+    CC1101_RX_RAW_OOK = CC1101_RX_RAW /* Source compatibility. */
 } cc1101_rx_format_t;
+
+typedef enum {
+    CC1101_PROFILE_OOK = 0,
+    CC1101_PROFILE_ASK,
+    CC1101_PROFILE_2FSK,
+    CC1101_PROFILE_GFSK
+} cc1101_modulation_t;
+
+typedef struct {
+    uint8_t pktctrl0;
+    uint8_t mdmcfg2;
+    uint8_t deviatn;
+    uint8_t agcctrl2;
+    uint8_t agcctrl1;
+    uint8_t agcctrl0;
+    uint8_t foccfg;
+    uint8_t frend0;
+    uint8_t iocfg0;
+    uint8_t marcstate;
+    uint8_t patable[8];
+} cc1101_profile_status_t;
+
+/* Frozen 26 MHz engineering starting profiles, not calibrated RF guarantees.
+ * All *_locked APIs require caller-owned bus lock; none acquire a mutex.
+ * Caller also owns GDO interrupt/capture suspension and app state validity.
+ * apply validates enums before I/O, confirms IDLE before flushing both FIFOs,
+ * verifies the complete delta, and returns IDLE (never starts TX or RX).
+ * Partial failure is not rolled back; caller must invalidate applied state.
+ * profile_readback publishes output only after all checked reads succeed. */
+esp_err_t cc1101_idle_locked(cc1101_handle_t *dev);
+esp_err_t cc1101_apply_profile_locked(cc1101_handle_t *dev,
+                                     cc1101_modulation_t modulation,
+                                     cc1101_rx_format_t format);
+esp_err_t cc1101_start_rx_locked(cc1101_handle_t *dev);
+esp_err_t cc1101_profile_readback_locked(cc1101_handle_t *dev,
+                                        cc1101_profile_status_t *status);
 
 typedef struct {
     uint8_t pktctrl0;

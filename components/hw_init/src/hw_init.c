@@ -1,7 +1,5 @@
 #include "hw_init.h"
 #include "esp_log.h"
-#include "esp_timer.h"
-#include <string.h>
 
 static const char *TAG = "HW_INIT";
 
@@ -10,118 +8,10 @@ SemaphoreHandle_t tx_done_sem_a = NULL;
 SemaphoreHandle_t tx_done_sem_b = NULL;
 SemaphoreHandle_t cc1101_bus_mutex = NULL;
 
-#define RAW_RING_SIZE 256
-static rfuzz_raw_edge_t s_edges[RAW_RING_SIZE];
-static size_t s_head, s_count;
-static bool s_raw, s_capture, s_paused, s_handler_installed = true;
-static uint32_t s_epoch;
-static uint64_t s_overflows, s_dropped;
-static portMUX_TYPE s_raw_lock = portMUX_INITIALIZER_UNLOCKED;
-static void gdo0_isr_b(void *arg);
-
-static void IRAM_ATTR gdo0_isr_raw(void *arg)
-{
-    int64_t now = esp_timer_get_time();
-    uint8_t level = gpio_get_level(PIN_NUM_GDO0_B);
-    portENTER_CRITICAL_ISR(&s_raw_lock);
-    if (s_capture) {
-        if (s_count < RAW_RING_SIZE) {
-            size_t pos = (s_head + s_count) % RAW_RING_SIZE;
-            s_edges[pos] = (rfuzz_raw_edge_t){now, s_epoch, level};
-            s_count++;
-        } else {
-            s_overflows++;
-            s_dropped++;
-            s_capture = false;
-            s_paused = true;
-            /* Bound ISR load under noise. Edges while paused cannot be counted. */
-            gpio_intr_disable(PIN_NUM_GDO0_B);
-        }
-    }
-    portEXIT_CRITICAL_ISR(&s_raw_lock);
-}
-
-void rfuzz_b_capture_stop(void)
-{
-    gpio_intr_disable(PIN_NUM_GDO0_B);
-    portENTER_CRITICAL(&s_raw_lock);
-    s_capture = false;
-    portEXIT_CRITICAL(&s_raw_lock);
-}
-
-esp_err_t rfuzz_b_capture_prepare(bool raw)
-{
-    rfuzz_b_capture_stop();
-    esp_err_t err = ESP_OK;
-    if (s_handler_installed) {
-        err = gpio_isr_handler_remove(PIN_NUM_GDO0_B);
-        if (err != ESP_OK) return err;
-        s_handler_installed = false;
-    }
-    portENTER_CRITICAL(&s_raw_lock);
-    s_raw = raw;
-    s_head = s_count = 0;
-    s_overflows = s_dropped = 0;
-    s_paused = false;
-    s_epoch++;
-    portEXIT_CRITICAL(&s_raw_lock);
-    xSemaphoreTake(tx_done_sem_b, 0);
-    err = gpio_set_intr_type(PIN_NUM_GDO0_B, raw ? GPIO_INTR_ANYEDGE : GPIO_INTR_NEGEDGE);
-    if (err != ESP_OK) return err;
-    return ESP_OK;
-}
-
-esp_err_t rfuzz_b_capture_arm(void)
-{
-    portENTER_CRITICAL(&s_raw_lock);
-    s_capture = s_raw;
-    s_paused = false;
-    s_epoch++;
-    portEXIT_CRITICAL(&s_raw_lock);
-    esp_err_t err;
-    if (!s_handler_installed) {
-        err = gpio_isr_handler_add(PIN_NUM_GDO0_B, s_raw ? gdo0_isr_raw : gdo0_isr_b, NULL);
-        if (err == ESP_OK) s_handler_installed = true;
-    } else {
-        err = gpio_intr_enable(PIN_NUM_GDO0_B);
-    }
-    if (err != ESP_OK) rfuzz_b_capture_stop();
-    return err;
-}
-
-size_t rfuzz_b_raw_drain(rfuzz_raw_edge_t *edges, size_t capacity)
-{
-    portENTER_CRITICAL(&s_raw_lock);
-    size_t count = s_count < capacity ? s_count : capacity;
-    for (size_t i = 0; i < count; i++)
-        edges[i] = s_edges[(s_head + i) % RAW_RING_SIZE];
-    s_head = (s_head + count) % RAW_RING_SIZE;
-    s_count -= count;
-    portEXIT_CRITICAL(&s_raw_lock);
-    return count;
-}
-
-void rfuzz_b_raw_stats(rfuzz_raw_stats_t *stats)
-{
-    portENTER_CRITICAL(&s_raw_lock);
-    *stats = (rfuzz_raw_stats_t){s_overflows, s_dropped, s_paused};
-    portEXIT_CRITICAL(&s_raw_lock);
-}
-
 static void IRAM_ATTR gdo0_isr_a(void* arg)
 {
     BaseType_t high_task_wakeup = pdFALSE;
     xSemaphoreGiveFromISR(tx_done_sem_a, &high_task_wakeup);
-
-    if (high_task_wakeup == pdTRUE) {
-        portYIELD_FROM_ISR();
-    }
-}
-
-static void IRAM_ATTR gdo0_isr_b(void* arg)
-{
-    BaseType_t high_task_wakeup = pdFALSE;
-    xSemaphoreGiveFromISR(tx_done_sem_b, &high_task_wakeup);
 
     if (high_task_wakeup == pdTRUE) {
         portYIELD_FROM_ISR();
@@ -179,15 +69,22 @@ esp_err_t init_hardware(void)
         .pull_up_en = 0,
         .pull_down_en = 0
     };
-    gpio_config(&io_b);
+    ret = gpio_config(&io_b);
+    if (ret != ESP_OK) return ret;
 
     tx_done_sem_a = xSemaphoreCreateBinary();
     tx_done_sem_b = xSemaphoreCreateBinary();
     cc1101_bus_mutex = xSemaphoreCreateMutex();
+    if (!tx_done_sem_a || !tx_done_sem_b || !cc1101_bus_mutex) return ESP_ERR_NO_MEM;
 
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(PIN_NUM_GDO0_A, gdo0_isr_a, NULL);
-    gpio_isr_handler_add(PIN_NUM_GDO0_B, gdo0_isr_b, NULL);
+    ret = gpio_install_isr_service(0);
+    if (ret != ESP_OK) return ret;
+    ret = gpio_isr_handler_add(PIN_NUM_GDO0_A, gdo0_isr_a, NULL);
+    if (ret != ESP_OK) return ret;
+    ret = rfuzz_b_capture_prepare(false);
+    if (ret != ESP_OK) return ret;
+    ret = rfuzz_b_capture_arm();
+    if (ret != ESP_OK) return ret;
 
     ESP_LOGI(TAG, "SPI3 bus + dual GDO0 IRQs initialized");
     return ESP_OK;

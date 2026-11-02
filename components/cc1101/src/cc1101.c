@@ -171,6 +171,165 @@ static void cc1101_read_burst(cc1101_handle_t *dev,
  * PUBLIC API
  * ============================================================ */
 
+/* Focused checked transport for profile transactions only. Unlike legacy
+ * accessors it propagates MISO/SPI failures instead of manufacturing zero.
+ * Header + up to eight bytes use one transaction/one CS assertion. */
+static esp_err_t cc1101_profile_transfer(cc1101_handle_t *dev, uint8_t command,
+                                        const uint8_t *data, uint8_t *out, size_t len)
+{
+    if (dev == NULL || len > 8) return ESP_ERR_INVALID_ARG;
+    uint8_t tx[9] = {command};
+    uint8_t rx[9] = {0};
+    if (data != NULL) memcpy(tx + 1, data, len);
+    cc1101_select(dev);
+    esp_err_t err = ESP_OK;
+    unsigned remaining = 2000;
+    while (gpio_get_level(dev->miso_pin)) {
+        if (--remaining == 0) { err = ESP_ERR_TIMEOUT; break; }
+        esp_rom_delay_us(1);
+    }
+    if (err == ESP_OK) {
+        spi_transaction_t transaction = {
+            .length = (len + 1) * 8,
+            .tx_buffer = tx,
+            .rx_buffer = rx
+        };
+        err = spi_device_polling_transmit(dev->spi, &transaction);
+    }
+    cc1101_deselect(dev);
+    if (err == ESP_OK && out != NULL) memcpy(out, rx + 1, len);
+    return err;
+}
+
+static esp_err_t cc1101_profile_read(cc1101_handle_t *dev, uint8_t reg, uint8_t *out)
+{
+    return cc1101_profile_transfer(dev, reg | CC1101_READ_SINGLE, NULL, out, 1);
+}
+
+static esp_err_t cc1101_profile_wait_state(cc1101_handle_t *dev, uint8_t state)
+{
+    int64_t deadline = esp_timer_get_time() + 20000;
+    do {
+        uint8_t actual;
+        esp_err_t err = cc1101_profile_transfer(dev, CC1101_MARCSTATE | CC1101_READ_BURST,
+                                               NULL, &actual, 1);
+        if (err != ESP_OK) return err;
+        if ((actual & 0x1F) == state) return ESP_OK;
+        vTaskDelay(1);
+    } while (esp_timer_get_time() < deadline);
+    return ESP_ERR_TIMEOUT;
+}
+
+esp_err_t cc1101_idle_locked(cc1101_handle_t *dev)
+{
+    esp_err_t err = cc1101_profile_transfer(dev, CC1101_SIDLE, NULL, NULL, 0);
+    return err == ESP_OK ? cc1101_profile_wait_state(dev, 0x01) : err;
+}
+
+esp_err_t cc1101_start_rx_locked(cc1101_handle_t *dev)
+{
+    esp_err_t err = cc1101_profile_transfer(dev, CC1101_SRX, NULL, NULL, 0);
+    if (err == ESP_OK) err = cc1101_profile_wait_state(dev, 0x0D);
+    if (err != ESP_OK && dev != NULL)
+        (void)cc1101_idle_locked(dev); /* Best effort only; original error wins. */
+    return err;
+}
+
+esp_err_t cc1101_profile_readback_locked(cc1101_handle_t *dev,
+                                        cc1101_profile_status_t *status)
+{
+    if (dev == NULL || status == NULL) return ESP_ERR_INVALID_ARG;
+    cc1101_profile_status_t value = {0};
+    const uint8_t registers[] = {CC1101_PKTCTRL0, CC1101_MDMCFG2, CC1101_DEVIATN,
+        CC1101_AGCCTRL2, CC1101_AGCCTRL1, CC1101_AGCCTRL0, CC1101_FOCCFG,
+        CC1101_FREND0, CC1101_IOCFG0};
+    uint8_t *fields[] = {&value.pktctrl0, &value.mdmcfg2, &value.deviatn,
+        &value.agcctrl2, &value.agcctrl1, &value.agcctrl0, &value.foccfg,
+        &value.frend0, &value.iocfg0};
+    for (size_t i = 0; i < sizeof(registers); i++) {
+        esp_err_t err = cc1101_profile_read(dev, registers[i], fields[i]);
+        if (err != ESP_OK) return err;
+    }
+    esp_err_t err = cc1101_profile_transfer(dev, CC1101_MARCSTATE | CC1101_READ_BURST,
+                                           NULL, &value.marcstate, 1);
+    if (err != ESP_OK) return err;
+    value.marcstate &= 0x1F;
+    err = cc1101_profile_transfer(dev, CC1101_PATABLE | CC1101_READ_BURST,
+                                 NULL, value.patable, sizeof(value.patable));
+    if (err != ESP_OK) return err;
+    const cc1101_profile_status_t empty = {0};
+    /* Neither an all-zero bus image nor an undefined MARCSTATE is evidence
+     * of a successful profile readback, even if the host SPI call succeeded. */
+    if (value.marcstate > 0x16 || memcmp(&value, &empty, sizeof(value)) == 0)
+        return ESP_FAIL;
+    *status = value;
+    return ESP_OK;
+}
+
+esp_err_t cc1101_apply_profile_locked(cc1101_handle_t *dev,
+                                     cc1101_modulation_t modulation,
+                                     cc1101_rx_format_t format)
+{
+    if (dev == NULL || (modulation != CC1101_PROFILE_OOK && modulation != CC1101_PROFILE_ASK &&
+        modulation != CC1101_PROFILE_2FSK && modulation != CC1101_PROFILE_GFSK) ||
+        (format != CC1101_RX_PACKET && format != CC1101_RX_RAW)) return ESP_ERR_INVALID_ARG;
+
+    esp_err_t err = cc1101_idle_locked(dev);
+    if (err != ESP_OK) return err;
+    err = cc1101_profile_transfer(dev, CC1101_SFRX, NULL, NULL, 0);
+    if (err != ESP_OK) return err;
+    err = cc1101_profile_transfer(dev, CC1101_SFTX, NULL, NULL, 0);
+    if (err != ESP_OK) return err;
+
+    uint8_t frend0, mdmcfg1;
+    err = cc1101_profile_read(dev, CC1101_FREND0, &frend0);
+    if (err != ESP_OK) return err;
+    err = cc1101_profile_read(dev, CC1101_MDMCFG1, &mdmcfg1);
+    if (err != ESP_OK) return err;
+    bool amplitude = modulation == CC1101_PROFILE_OOK || modulation == CC1101_PROFILE_ASK;
+    uint8_t modem = amplitude ? 0x30 : modulation == CC1101_PROFILE_GFSK ? 0x10 : 0x00;
+    uint8_t table[8] = {0};
+    if (amplitude) {
+        table[0] = modulation == CC1101_PROFILE_ASK ? 0x34 : 0x00;
+        table[1] = CC1101_DEFAULT_PA_433_MHZ;
+    } else table[0] = CC1101_DEFAULT_PA_433_MHZ;
+    /* 26 MHz crystal, +/-20.629883 kHz FSK deviation. Amplitude profiles
+     * ignore deviation; writing it still makes every transition deterministic. */
+    uint32_t frequency = (uint32_t)(((uint64_t)433920000 << 16) / 26000000ULL);
+    const struct { uint8_t reg, value; } writes[] = {
+        {CC1101_PKTCTRL0, format == CC1101_RX_RAW ? 0x30 : 0x05},
+        {CC1101_MDMCFG2, modem | (format == CC1101_RX_RAW ? 0 : 3)},
+        {CC1101_DEVIATN, 0x35}, {CC1101_AGCCTRL2, 0x03},
+        {CC1101_AGCCTRL1, amplitude ? 0x00 : 0x40}, {CC1101_AGCCTRL0, 0x91},
+        {CC1101_FOCCFG, amplitude ? 0x34 : 0x36},
+        {CC1101_FREND0, (frend0 & ~CC1101_FREND0_PA_POWER_MASK) | (amplitude ? 1 : 0)},
+        {CC1101_IOCFG0, format == CC1101_RX_RAW ? 0x0D : 0x06},
+        {CC1101_MDMCFG1, mdmcfg1 & 0x7F}, /* FEC off; preserve preamble/spacing. */
+        {CC1101_FREQ2, (frequency >> 16) & 0xFF},
+        {CC1101_FREQ1, (frequency >> 8) & 0xFF}, {CC1101_FREQ0, frequency & 0xFF},
+        {CC1101_CHANNR, 0}, {CC1101_MDMCFG4, 0xCA}, {CC1101_MDMCFG3, 0x83}
+    };
+    for (size_t i = 0; i < sizeof(writes) / sizeof(writes[0]); i++) {
+        err = cc1101_profile_transfer(dev, writes[i].reg, &writes[i].value, NULL, 1);
+        if (err != ESP_OK) return err;
+    }
+    err = cc1101_profile_transfer(dev, CC1101_PATABLE | CC1101_WRITE_BURST,
+                                 table, NULL, sizeof(table));
+    if (err != ESP_OK) return err;
+    for (size_t i = 0; i < sizeof(writes) / sizeof(writes[0]); i++) {
+        uint8_t actual;
+        err = cc1101_profile_read(dev, writes[i].reg, &actual);
+        if (err != ESP_OK) return err;
+        if (actual != writes[i].value) return ESP_FAIL;
+    }
+    cc1101_profile_status_t actual;
+    err = cc1101_profile_readback_locked(dev, &actual);
+    if (err != ESP_OK) return err;
+    if (memcmp(actual.patable, table, sizeof(table)) != 0 || actual.marcstate != 0x01)
+        return ESP_FAIL;
+    return ESP_OK;
+}
+
 esp_err_t cc1101_init(cc1101_handle_t *dev,
                       spi_device_handle_t spi_handle,
                       gpio_num_t cs,
@@ -254,6 +413,10 @@ void cc1101_config(cc1101_handle_t *dev)
     cc1101_write_reg(dev, CC1101_AGCCTRL0, 0x91);
 
     /* Configure both radios at nominal +7 dBm; actual ERP needs measurement. */
+    /* This default configuration explicitly selects OOK, including when a
+     * caller reapplies it after true ASK. The power helper itself preserves ASK. */
+    const uint8_t off_table[8] = {0};
+    cc1101_write_burst(dev, CC1101_PATABLE, off_table, sizeof(off_table));
     cc1101_set_tx_power(dev, CC1101_DEFAULT_PA_433_MHZ);
 
     cc1101_write_reg(dev, CC1101_MCSM0,
@@ -331,53 +494,39 @@ void cc1101_set_rx_mode(cc1101_handle_t *dev)
 
 void cc1101_get_rx_format_status(cc1101_handle_t *dev, cc1101_rx_format_status_t *status)
 {
-    status->pktctrl0 = cc1101_read_reg(dev, CC1101_PKTCTRL0);
-    status->mdmcfg2 = cc1101_read_reg(dev, CC1101_MDMCFG2);
-    status->iocfg0 = cc1101_read_reg(dev, CC1101_IOCFG0);
-    status->marcstate = cc1101_read_status(dev, CC1101_MARCSTATE) & 0x1F;
-}
-
-static esp_err_t cc1101_wait_state(cc1101_handle_t *dev, uint8_t state)
-{
-    int64_t deadline = esp_timer_get_time() + 20000;
-    do {
-        if ((cc1101_read_status(dev, CC1101_MARCSTATE) & 0x1F) == state)
-            return ESP_OK;
-        vTaskDelay(1);
-    } while (esp_timer_get_time() < deadline);
-    return ESP_ERR_TIMEOUT;
+    if (status == NULL) return;
+    cc1101_profile_status_t actual;
+    memset(status, 0, sizeof(*status));
+    status->marcstate = 0xFF; /* Legacy void API: explicit unavailable sentinel. */
+    if (cc1101_profile_readback_locked(dev, &actual) != ESP_OK) return;
+    status->pktctrl0 = actual.pktctrl0;
+    status->mdmcfg2 = actual.mdmcfg2;
+    status->iocfg0 = actual.iocfg0;
+    status->marcstate = actual.marcstate;
 }
 
 esp_err_t cc1101_set_rx_format(cc1101_handle_t *dev, cc1101_rx_format_t format)
 {
-    if (format != CC1101_RX_PACKET && format != CC1101_RX_RAW_OOK)
+    if (dev == NULL || (format != CC1101_RX_PACKET && format != CC1101_RX_RAW))
         return ESP_ERR_INVALID_ARG;
-
-    cc1101_strobe(dev, CC1101_SIDLE);
-    esp_err_t err = cc1101_wait_state(dev, 0x01);
-    if (err != ESP_OK)
-        return err; /* Do not flush a potentially live receiver. */
-    cc1101_strobe(dev, CC1101_SFRX);
-
-    bool raw = format == CC1101_RX_RAW_OOK;
-    uint8_t pktctrl0 = raw ? 0x30 : 0x05;
-    uint8_t mdmcfg2 = raw ? 0x30 : 0x33;
-    uint8_t iocfg0 = raw ? 0x0D : CC1101_GDO_SYNC_WORD;
-    cc1101_write_reg(dev, CC1101_PKTCTRL0, pktctrl0);
-    cc1101_write_reg(dev, CC1101_MDMCFG2, mdmcfg2);
-    cc1101_write_reg(dev, CC1101_IOCFG0, iocfg0);
-
-    cc1101_rx_format_status_t actual;
-    cc1101_get_rx_format_status(dev, &actual);
-    if (actual.pktctrl0 != pktctrl0 || actual.mdmcfg2 != mdmcfg2 ||
-        actual.iocfg0 != iocfg0)
-        return ESP_FAIL; /* Remain IDLE, application marks applied mode invalid. */
-
-    cc1101_strobe(dev, CC1101_SRX);
-    err = cc1101_wait_state(dev, 0x0D);
-    if (err != ESP_OK)
-        cc1101_strobe(dev, CC1101_SIDLE);
-    return err;
+    esp_err_t err = cc1101_idle_locked(dev);
+    if (err != ESP_OK) return err;
+    cc1101_profile_status_t actual;
+    err = cc1101_profile_readback_locked(dev, &actual);
+    if (err != ESP_OK) return err;
+    cc1101_modulation_t modulation;
+    switch (actual.mdmcfg2 & CC1101_MDMCFG2_MOD_FORMAT_MASK) {
+    case (CC1101_MOD_2FSK << 4): modulation = CC1101_PROFILE_2FSK; break;
+    case (CC1101_MOD_GFSK << 4): modulation = CC1101_PROFILE_GFSK; break;
+    case (CC1101_MOD_ASK_OOK << 4):
+        if (actual.patable[0] == 0x34) modulation = CC1101_PROFILE_ASK;
+        else if (actual.patable[0] == 0x00) modulation = CC1101_PROFILE_OOK;
+        else return ESP_ERR_INVALID_STATE;
+        break;
+    default: return ESP_ERR_INVALID_STATE;
+    }
+    err = cc1101_apply_profile_locked(dev, modulation, format);
+    return err == ESP_OK ? cc1101_start_rx_locked(dev) : err;
 }
 
 bool cc1101_poll_packet(cc1101_handle_t *dev,
@@ -469,26 +618,29 @@ esp_err_t cc1101_set_channel(cc1101_handle_t *dev, uint8_t channel)
 
 esp_err_t cc1101_set_tx_power(cc1101_handle_t *dev, uint8_t pa_value)
 {
-    uint8_t modulation = cc1101_read_reg(dev, CC1101_MDMCFG2) &
-                         CC1101_MDMCFG2_MOD_FORMAT_MASK;
-    uint8_t frend0 = cc1101_read_reg(dev, CC1101_FREND0) &
-                     ~CC1101_FREND0_PA_POWER_MASK;
-
-    if (modulation == (CC1101_MOD_ASK_OOK << 4))
-    {
-        /* One ordered burst: index 0 is off, index 1 is the OOK on level. */
-        const uint8_t pa_table[] = {0x00, pa_value};
-        cc1101_write_burst(dev, CC1101_PATABLE, pa_table, sizeof(pa_table));
+    if (dev == NULL) return ESP_ERR_INVALID_ARG;
+    uint8_t modulation, frend0;
+    esp_err_t err = cc1101_profile_read(dev, CC1101_MDMCFG2, &modulation);
+    if (err != ESP_OK) return err;
+    err = cc1101_profile_read(dev, CC1101_FREND0, &frend0);
+    if (err != ESP_OK) return err;
+    frend0 &= ~CC1101_FREND0_PA_POWER_MASK;
+    uint8_t table[8] = {0};
+    if ((modulation & CC1101_MDMCFG2_MOD_FORMAT_MASK) == (CC1101_MOD_ASK_OOK << 4)) {
+        uint8_t old_table[8];
+        err = cc1101_profile_transfer(dev, CC1101_PATABLE | CC1101_READ_BURST,
+                                     NULL, old_table, sizeof(old_table));
+        if (err != ESP_OK) return err;
+        /* Modulation code 3 serves both profiles. Do not erase true ASK's
+         * configured -10 dBm low level; reset/unrecognized tables mean OOK. */
+        table[0] = old_table[0] == 0x34 ? 0x34 : 0x00;
+        table[1] = pa_value;
         frend0 |= 1;
-    }
-    else
-    {
-        cc1101_write_burst(dev, CC1101_PATABLE, &pa_value, 1);
-    }
-
-    /* Preserve the front-end configuration outside the PA table index. */
-    cc1101_write_reg(dev, CC1101_FREND0, frend0);
-    return ESP_OK;
+    } else table[0] = pa_value;
+    err = cc1101_profile_transfer(dev, CC1101_PATABLE | CC1101_WRITE_BURST,
+                                 table, NULL, sizeof(table));
+    if (err != ESP_OK) return err;
+    return cc1101_profile_transfer(dev, CC1101_FREND0, &frend0, NULL, 1);
 }
 
 esp_err_t cc1101_set_datarate(cc1101_handle_t *dev, uint32_t baud)
