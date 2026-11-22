@@ -1,0 +1,14 @@
+menu "CC1101 radio"
+
+config CC1101_OOK_CLOSE_RANGE_BENCH
+    bool "Low-power OOK for close-range bench testing"
+    default n
+    help
+        Use PATABLE {0x00, 0x12} for OOK at 433.92 MHz: nominal -30 dBm
+        conducted according to TI's 433 MHz PA table, not measured power.
+        This is an explicit close-range test option, not automatic power
+        adaptation and not a guarantee at any antenna distance.
+        The normal C8 ceiling and other modulation profiles remain unchanged.
+        No automatic transmissions or retries are enabled.
+
+endmenu
