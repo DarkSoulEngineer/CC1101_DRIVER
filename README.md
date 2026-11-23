@@ -122,6 +122,20 @@ References: [TI CC1101 datasheet](https://www.ti.com/lit/ds/symlink/cc1101.pdf),
 [DN010: Close-in reception](https://www.ti.com/lit/an/swra147b/swra147b.pdf),
 [DN013: PA tables](https://www.ti.com/lit/an/swra151a/swra151a.pdf).
 
+## Documentation
+
+Full driver documentation (manual, API reference, internals, power tables,
+and the complete source) lives in [`docs/`](docs/) as a uv + Sphinx project.
+To build it locally:
+
+```powershell
+cd docs
+uv sync
+uv run sphinx-build -b html . _build\html
+```
+
+The rendered pages are written to `docs/_build/html/index.html`.
+
 ## License
 
 [MIT](LICENSE)

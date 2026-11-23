@@ -1,15 +1,23 @@
+/**
+ * @file cc1101.h
+ * @brief Reusable native CC1101 driver: register map, device handle, and
+ *        checked SPI interface shared by both radios.
+ *
+ * All *_locked APIs require caller-owned bus serialization (the shared
+ * cc1101_bus_mutex) and never acquire a mutex themselves. Legacy void
+ * wrappers keep compatibility but only log failures; active paths use the
+ * checked variants that propagate SPI/MISO errors.
+ */
 #ifndef CC1101_H
 #define CC1101_H
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "sdkconfig.h"
 #include "esp_err.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
-#include <stddef.h>
-#include <stdint.h>
-#include <stdbool.h>
 
 #define CC1101_FIFO_SIZE        64
 #define CC1101_MAX_PACKET_LEN   255
@@ -165,12 +173,28 @@
 
 /* TI 433 MHz nominal +7 dBm (~5 mW) conducted; not a guaranteed ERP. */
 #define CC1101_DEFAULT_PA_433_MHZ      0xC8
-/* Explicitly approved 8 cm bench option; nominal conducted power, not measured.
- * Keep the normal C8 ceiling and true ASK's 34/C8 pair unchanged. */
-#if defined(CONFIG_CC1101_OOK_CLOSE_RANGE_BENCH) && CONFIG_CC1101_OOK_CLOSE_RANGE_BENCH
-#define CC1101_OOK_PA_433_MHZ          0x12 /* TI 433 MHz nominal -30 dBm */
+/* TI 433 MHz nominal -30 dBm conducted; not measured power. */
+#define CC1101_CLOSE_RANGE_PA_433_MHZ  0x12
+/* Optional all-profile bench override. OOK stays {00,12}; ASK becomes a true
+ * two-level {12,34} pair; FSK/GFSK use entry 0 at the low level. */
+#if defined(CONFIG_CC1101_ALL_PROFILES_CLOSE_RANGE_BENCH) && \
+    CONFIG_CC1101_ALL_PROFILES_CLOSE_RANGE_BENCH
+#define CC1101_OOK_PA_433_MHZ          CC1101_CLOSE_RANGE_PA_433_MHZ
+#define CC1101_ASK_LOW_PA_433_MHZ      CC1101_CLOSE_RANGE_PA_433_MHZ
+#define CC1101_ASK_HIGH_PA_433_MHZ     0x34 /* TI 433 MHz nominal -10 dBm */
+#define CC1101_FSK_PA_433_MHZ          CC1101_CLOSE_RANGE_PA_433_MHZ
+/* Explicitly approved 8 cm OOK-only bench option; nominal, not measured.
+ * The normal C8 ceiling and true ASK's 34/C8 pair stay unchanged by default. */
+#elif defined(CONFIG_CC1101_OOK_CLOSE_RANGE_BENCH) && CONFIG_CC1101_OOK_CLOSE_RANGE_BENCH
+#define CC1101_OOK_PA_433_MHZ          CC1101_CLOSE_RANGE_PA_433_MHZ
+#define CC1101_ASK_LOW_PA_433_MHZ      0x34 /* TI 433 MHz nominal -10 dBm */
+#define CC1101_ASK_HIGH_PA_433_MHZ     CC1101_DEFAULT_PA_433_MHZ
+#define CC1101_FSK_PA_433_MHZ          CC1101_DEFAULT_PA_433_MHZ
 #else
 #define CC1101_OOK_PA_433_MHZ          CC1101_DEFAULT_PA_433_MHZ
+#define CC1101_ASK_LOW_PA_433_MHZ      0x34 /* TI 433 MHz nominal -10 dBm */
+#define CC1101_ASK_HIGH_PA_433_MHZ     CC1101_DEFAULT_PA_433_MHZ
+#define CC1101_FSK_PA_433_MHZ          CC1101_DEFAULT_PA_433_MHZ
 #endif
 
 /* ============================================================

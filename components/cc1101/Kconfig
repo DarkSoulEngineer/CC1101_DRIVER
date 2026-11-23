@@ -11,4 +11,16 @@ config CC1101_OOK_CLOSE_RANGE_BENCH
         The normal C8 ceiling and other modulation profiles remain unchanged.
         No automatic transmissions or retries are enabled.
 
+config CC1101_ALL_PROFILES_CLOSE_RANGE_BENCH
+    bool "Low-power PA for all profiles in close-range bench testing"
+    default n
+    help
+        Use TI's nominal 433 MHz low-power PA levels for every profile:
+        OOK {0x00, 0x12}, ASK {0x12, 0x34}, 2-FSK/GFSK {0x12, 0x00}.
+        These are nominal conducted register values, not measured power.
+        This option overrides the OOK-only bench option and is intended only
+        for short bench links. The default build keeps OOK {0x00, 0xC8},
+        ASK {0x34, 0xC8}, and 2-FSK/GFSK {0xC8, 0x00}. No automatic
+        transmissions or retries are enabled.
+
 endmenu
