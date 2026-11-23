@@ -32,7 +32,9 @@ exclude_patterns = ["_build", ".venv"]
 suppress_warnings = ["myst.xref_missing", "myst.iref_missing"]
 
 # -- HTML output -------------------------------------------------------------
-html_theme = "sphinx_rtd_theme"
+# Espressif's official theme (fork of sphinx-rtd-theme used by the ESP-IDF
+# Programming Guide). Requires sphinx<8; pinned in pyproject.toml.
+html_theme = "sphinx_idf_theme"
 html_theme_options = {
     "navigation_depth": 3,
     "collapse_navigation": False,
@@ -40,3 +42,19 @@ html_theme_options = {
 }
 html_title = "CC1101 Driver documentation"
 html_static_path = []
+
+# Theme metadata. The driver is target-independent; no target selector.
+languages = ["en"]
+language = "en"
+project_slug = "cc1101-driver"
+project_homepage = "https://github.com/DarkSoulEngineer/CC1101_DRIVER"
+version = "1.0"
+pdf_file = ""
+versions_url = ""
+
+
+def setup(app):
+    # sphinx_idf_theme reads these config values but does not register them
+    # itself (esp-docs normally does). Register them for standalone use.
+    app.add_config_value("pdf_file", "", "html")
+    app.add_config_value("idf_target_title_dict", {}, "html")

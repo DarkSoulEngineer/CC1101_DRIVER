@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Sphinx documentation for the standalone CC1101 ESP-IDF driver"
 requires-python = ">=3.11"
 dependencies = [
-    "sphinx>=8.0",
-    "sphinx-rtd-theme>=3.0",
-    "myst-parser>=4.0",
+    # Same stack as the ESP-IDF v6.1 Programming Guide (esp-docs 2.5 pins).
+    "sphinx~=7.1.2",
+    "sphinx-idf-theme==2.0.1",
+    "docutils<0.21",
+    "myst-parser>=4.0,<5",
 ]
